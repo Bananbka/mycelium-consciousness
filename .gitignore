@@ -1,0 +1,19 @@
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+.vscode/

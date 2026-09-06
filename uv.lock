@@ -1,0 +1,37 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[manifest]
+members = [
+    "api",
+    "celery",
+    "grpc-ingester",
+    "memory-sync-project",
+    "shared",
+]
+
+[[package]]
+name = "api"
+version = "0.1.0"
+source = { editable = "services/api" }
+
+[[package]]
+name = "celery"
+version = "0.1.0"
+source = { editable = "services/celery" }
+
+[[package]]
+name = "grpc-ingester"
+version = "0.1.0"
+source = { editable = "services/grpc_ingester" }
+
+[[package]]
+name = "memory-sync-project"
+version = "0.1.0"
+source = { virtual = "." }
+
+[[package]]
+name = "shared"
+version = "0.1.0"
+source = { editable = "shared" }
