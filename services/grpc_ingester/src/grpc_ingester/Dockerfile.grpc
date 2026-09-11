@@ -1,13 +1,26 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY services ./services
 
-RUN pip install --no-cache-dir uv && uv sync --package grpc-ingester --frozen
+RUN pip install --no-cache-dir uv \
+    && uv sync --package grpc-ingester --frozen --no-dev
+
+RUN uv run --package grpc-ingester --frozen --no-sync --with grpcio-tools \
+    python -m shared.protos.generate
+
+RUN useradd --create-home --uid 10001 app && chown -R app:app /app
+USER app
 
 EXPOSE 50051
 
-CMD ["uv", "run", "grpc-ingester"]
+CMD ["uv", "run", "--package", "grpc-ingester", "--frozen", "--no-sync", \
+     "grpc-ingester"]

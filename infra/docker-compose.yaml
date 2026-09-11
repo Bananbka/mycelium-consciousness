@@ -1,7 +1,6 @@
 services:
   nginx:
     image: nginx:1.27-alpine
-    container_name: clone_nginx
     restart: always
     depends_on:
       - api
@@ -11,57 +10,94 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: services/api/src/api/Dockerfile.api
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    working_dir: /app
+    command:
+      - uv
+      - run
+      - --package
+      - api
+      - --frozen
+      - --no-sync
+      - alembic
+      - -c
+      - shared/alembic.ini
+      - upgrade
+      - head
+    restart: "no"
+
   api:
     build:
       context: ..
       dockerfile: services/api/src/api/Dockerfile.api
-    container_name: clone_api
     restart: always
     env_file:
       - .env
     depends_on:
-      - db
-      - redis
-    ports:
-      - "${API_PORT:-8000}:8000"
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
 
   grpc-ingester:
     build:
       context: ..
       dockerfile: services/grpc_ingester/src/grpc_ingester/Dockerfile.grpc
-    container_name: clone_grpc_ingester
     restart: always
     env_file:
       - .env
     depends_on:
-      - redis
-    ports:
-      - "${GRPC_PORT:-50051}:50051"
+      redis:
+        condition: service_healthy
+    expose:
+      - "50051"
 
   celery-worker:
     build:
       context: ..
       dockerfile: services/celery/src/Dockerfile.celery
-    container_name: clone_celery_worker
     restart: always
     env_file:
       - .env
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   db:
-    image: ankane/pgvector:latest
+    image: pgvector/pgvector:pg16
     container_name: clone_postgres
     restart: always
     env_file:
       - .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
       POSTGRES_DB: ${POSTGRES_DB:-clone_memory_db}
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-clone_memory_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -71,8 +107,13 @@ services:
     restart: always
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
 
 volumes:
   postgres_data:
