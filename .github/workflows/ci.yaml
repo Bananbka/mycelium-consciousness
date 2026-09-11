@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - name: Generate protobuf stubs
+        run: uv run --with grpcio-tools python -m shared.protos.generate
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Verify lockfile is current
+        run: uv lock --check
+
+      - name: Apply migrations, then verify they match the ORM models
+        run: |
+          uv run alembic -c shared/alembic.ini upgrade head
+          uv run alembic -c shared/alembic.ini check
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: secretpassword
+          POSTGRES_DB: clone_memory_db
+
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: secretpassword
+          POSTGRES_DB: clone_memory_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
