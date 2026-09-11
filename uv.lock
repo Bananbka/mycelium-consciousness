@@ -347,19 +347,29 @@ name = "grpc-ingester"
 version = "0.1.0"
 source = { editable = "services/grpc_ingester" }
 dependencies = [
+    { name = "celery" },
     { name = "grpcio" },
-    { name = "grpcio-tools" },
     { name = "protobuf" },
     { name = "redis" },
+    { name = "shared" },
+]
+
+[package.dev-dependencies]
+codegen = [
+    { name = "grpcio-tools" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "celery", specifier = ">=5.6.0" },
     { name = "grpcio", specifier = ">=1.76.0" },
-    { name = "grpcio-tools", specifier = ">=1.76.0" },
     { name = "protobuf", specifier = ">=6.33.2" },
     { name = "redis", specifier = ">=7.1.0" },
+    { name = "shared", editable = "shared" },
 ]
+
+[package.metadata.requires-dev]
+codegen = [{ name = "grpcio-tools", specifier = ">=1.76.0" }]
 
 [[package]]
 name = "grpcio"

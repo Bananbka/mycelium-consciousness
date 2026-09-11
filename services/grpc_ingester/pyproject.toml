@@ -8,11 +8,20 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "celery>=5.6.0",
     "grpcio>=1.76.0",
-    "grpcio-tools>=1.76.0",
     "protobuf>=6.33.2",
     "redis>=7.1.0",
+    "shared",
 ]
+
+[dependency-groups]
+codegen = [
+    "grpcio-tools>=1.76.0",
+]
+
+[tool.uv.sources]
+shared = { workspace = true }
 
 [project.scripts]
 grpc-ingester = "grpc_ingester:main"
