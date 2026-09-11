@@ -11,9 +11,20 @@ __pycache__/
 *.so
 .Python
 
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
 # Pytest / Coverage
 .pytest_cache/
 .coverage
 htmlcov/
 
+# Generated protobuf stubs
+*_pb2.py
+*_pb2.pyi
+*_pb2_grpc.py
+*_pb2_grpc.pyi
+
 .vscode/
+.idea/
