@@ -16,6 +16,8 @@ down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+EMBEDDING_DIM = 768
+
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -23,15 +25,20 @@ def upgrade() -> None:
         "clone_profiles",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("designation", sa.String(), nullable=False),
-        sa.Column("status", sa.String(), nullable=False),
+        sa.Column(
+            "status",
+            sa.String(),
+            nullable=False,
+            server_default="active",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.func.now(),
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_clone_profiles_id", "clone_profiles", ["id"])
     op.create_index(
         "ix_clone_profiles_designation",
         "clone_profiles",
@@ -43,21 +50,42 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("clone_id", sa.Integer(), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("embedding", pgvector.sqlalchemy.Vector(dim=768), nullable=True),
+        sa.Column(
+            "embedding",
+            pgvector.sqlalchemy.Vector(dim=EMBEDDING_DIM),
+            nullable=True,
+        ),
         sa.Column(
             "timestamp",
             sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.ForeignKeyConstraint(["clone_id"], ["clone_profiles.id"]),
+        sa.ForeignKeyConstraint(
+            ["clone_id"],
+            ["clone_profiles.id"],
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_memory_chunks_id", "memory_chunks", ["id"])
+    op.create_index(
+        "ix_memory_chunks_clone_id_timestamp",
+        "memory_chunks",
+        ["clone_id", "timestamp"],
+    )
+    op.create_index(
+        "ix_memory_chunks_embedding_hnsw",
+        "memory_chunks",
+        ["embedding"],
+        postgresql_using="hnsw",
+        postgresql_with={"m": 16, "ef_construction": 64},
+        postgresql_ops={"embedding": "vector_cosine_ops"},
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_memory_chunks_id", table_name="memory_chunks")
+    op.drop_index("ix_memory_chunks_embedding_hnsw", table_name="memory_chunks")
+    op.drop_index("ix_memory_chunks_clone_id_timestamp", table_name="memory_chunks")
     op.drop_table("memory_chunks")
     op.drop_index("ix_clone_profiles_designation", table_name="clone_profiles")
-    op.drop_index("ix_clone_profiles_id", table_name="clone_profiles")
     op.drop_table("clone_profiles")
