@@ -1,16 +1,23 @@
 [project]
-name = "celery"
+name = "celery-worker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Background memory batch processing worker"
 readme = "README.md"
 authors = [
     { name = "Bananbka", email = "bananbka0.2@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "celery>=5.6.0",
+    "redis>=7.1.0",
+    "shared",
+]
+
+[tool.uv.sources]
+shared = { workspace = true }
 
 [project.scripts]
-celery = "celery:main"
+celery-worker = "celery_worker:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]

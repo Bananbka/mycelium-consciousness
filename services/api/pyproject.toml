@@ -6,8 +6,16 @@ readme = "README.md"
 authors = [
     { name = "Bananbka", email = "bananbka0.2@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.125.0",
+    "shared",
+    "sqlalchemy>=2.0.52",
+    "uvicorn[standard]>=0.38.0",
+]
+
+[tool.uv.sources]
+shared = { workspace = true }
 
 [project.scripts]
 api = "api:main"

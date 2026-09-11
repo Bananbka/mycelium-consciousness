@@ -6,8 +6,13 @@ readme = "README.md"
 authors = [
     { name = "Bananbka", email = "bananbka0.2@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.19.2",
+    "asyncpg>=0.31.0",
+    "pgvector>=0.4.2",
+    "sqlalchemy>=2.0.52",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]

@@ -1,13 +1,18 @@
 [project]
 name = "grpc-ingester"
 version = "0.1.0"
-description = "Add your description here"
+description = "Asynchronous gRPC stream ingestion service"
 readme = "README.md"
 authors = [
     { name = "Bananbka", email = "bananbka0.2@gmail.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.76.0",
+    "grpcio-tools>=1.76.0",
+    "protobuf>=6.33.2",
+    "redis>=7.1.0",
+]
 
 [project.scripts]
 grpc-ingester = "grpc_ingester:main"

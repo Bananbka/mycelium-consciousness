@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+COPY shared ./shared
+COPY services ./services
+
+RUN pip install --no-cache-dir uv && uv sync --package celery-worker --frozen
+
+CMD ["uv", "run", "celery", "-A", "celery_worker.app", "worker", "--loglevel=INFO"]
