@@ -30,7 +30,12 @@ Main components:
 Install dependencies and run quality checks:
 
 ```bash
-uv sync --all-packages --dev
+uv sync --all-packages --dev --group codegen
+
+# Protobuf stubs are generated, not committed. Required before running the
+# ingester locally; the Docker build does this itself.
+uv run python -m shared.protos.generate
+
 uv run ruff check .
 uv run ruff format --check .
 uv run pre-commit run --all-files
@@ -39,5 +44,24 @@ uv run pre-commit run --all-files
 Run local infrastructure:
 
 ```bash
+cp infra/.env.example infra/.env   # then fill in GEMINI_API_KEY
 docker compose -f infra/docker-compose.yaml up --build
+```
+
+The stack is reached through nginx on `http://localhost` — `GET /health` for the
+admin API, and the `memory_stream.MemoryStream` service over HTTP/2 for implant
+streams. The `migrate` service applies Alembic migrations to completion before
+`api` and `celery-worker` start.
+
+Scale the stateless services horizontally:
+
+```bash
+docker compose -f infra/docker-compose.yaml up --scale api=3 --scale grpc-ingester=2
+```
+
+Database migrations:
+
+```bash
+uv run alembic -c shared/alembic.ini upgrade head
+uv run alembic -c shared/alembic.ini check    # fails if models drift from schema
 ```
