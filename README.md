@@ -65,3 +65,57 @@ Database migrations:
 uv run alembic -c shared/alembic.ini upgrade head
 uv run alembic -c shared/alembic.ini check    # fails if models drift from schema
 ```
+
+Run the tests (needs a reachable pgvector database):
+
+```bash
+uv sync --all-packages --dev --group test
+uv run pytest
+```
+
+Tests live in `tests/` at the workspace root because they span `api`,
+`celery_worker`, `grpc_ingester` and `shared`. They create and drop their own
+`${POSTGRES_DB}_test` database and refuse to run against one whose name does not
+contain `test`.
+
+After recreating or scaling `api` or `grpc-ingester`, reload the gateway so it
+re-resolves the upstream address:
+
+```bash
+docker compose -f infra/docker-compose.yaml restart nginx
+```
+
+## Users, roles and access control
+
+Authentication lives in a `users` table linked one-to-one to `clone_profiles`,
+so credentials stay off the domain entity on the ingestion hot path. The link is
+nullable and unique: a clone owns exactly one profile, while an admin owns none
+rather than carrying a synthetic one. Two roles: `clone` (regular user) and
+`admin` (operator).
+
+Access control runs on two axes. Vertical (`require_role`) separates privilege
+levels and answers 403, not 401, to an authenticated caller with the wrong role.
+Horizontal checks resolve ownership from the token subject, never from the path,
+and listing endpoints filter by owner inside the SQL query.
+
+Tokens are stateless JWTs, so the API scales horizontally without a shared
+session store; the user is re-read on every request, which makes deactivation
+take effect immediately rather than at token expiry.
+
+| Endpoint | Anonymous | Clone | Admin |
+| --- | --- | --- | --- |
+| `POST /auth/register` | 201 | – | – |
+| `POST /auth/login` | 200 / 401 | – | – |
+| `GET /me/home` | 401 | 200 | 403 |
+| `GET /admin/home` | 401 | 403 | 200 |
+| `GET /profiles/me` | 401 | 200 | 403 |
+| `PATCH /profiles/{id}` | 401 | own only, else 403 | any |
+| `POST /memories` | 401 | 201 (own stream) | 403 |
+| `GET /memories/search` | 401 | own memories only | 403 |
+| `GET /admin/*` | 401 | 403 | 200 |
+
+Admins cannot self-register; seed one out of band:
+
+```bash
+uv run --package api seed-admin ops@example.com <password>
+```
