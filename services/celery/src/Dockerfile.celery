@@ -5,6 +5,9 @@ ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
+# Optional extras, e.g. --build-arg EXTRAS=gemini for live embeddings.
+ARG EXTRAS=""
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
@@ -12,7 +15,7 @@ COPY shared ./shared
 COPY services ./services
 
 RUN pip install --no-cache-dir uv \
-    && uv sync --package celery-worker --frozen --no-dev
+    && uv sync --package celery-worker --frozen --no-dev ${EXTRAS:+--extra $EXTRAS}
 
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app

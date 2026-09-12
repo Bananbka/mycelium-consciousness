@@ -1,5 +1,12 @@
+"""Celery application: configuration and worker-process lifecycle.
+
+Task definitions live in celery_worker.tasks; they are pulled in via `include`
+rather than imported here, which would be circular.
+"""
+
 import asyncio
 import os
+import threading
 
 from celery import Celery
 from celery.signals import worker_process_init, worker_process_shutdown
@@ -14,32 +21,47 @@ app = Celery(
     "clone_memory_worker",
     broker=BROKER_URL,
     backend=RESULT_BACKEND,
+    include=["celery_worker.tasks"],
 )
 app.conf.task_default_queue = TASK_QUEUE
 app.conf.worker_prefetch_multiplier = 1
 app.conf.task_acks_late = True
 app.conf.broker_connection_retry_on_startup = True
 
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_lock = threading.Lock()
+
+
+def run_async(coro):
+    """Run a coroutine on this worker process's own persistent event loop.
+
+    asyncio.run() would build and tear down a loop per task, and pooled asyncpg
+    connections are bound to the loop that created them; reusing them from a
+    second loop raises "attached to a different loop".
+
+    The lock is a no-op under the prefork pool (one task per process at a
+    time). It matters for --pool=threads/gevent, where two tasks would
+    otherwise call run_until_complete on the same loop and the second would
+    raise "This event loop is already running".
+    """
+    global _loop
+    with _loop_lock:
+        if _loop is None or _loop.is_closed():
+            _loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(_loop)
+        return _loop.run_until_complete(coro)
+
 
 @worker_process_init.connect
 def _reset_db_pool(**_kwargs) -> None:
-    asyncio.run(dispose_engine())
+    run_async(dispose_engine())
 
 
 @worker_process_shutdown.connect
 def _close_db_pool(**_kwargs) -> None:
-    asyncio.run(dispose_engine())
-
-
-@app.task(name="memory.process_batch")
-def process_batch(
-    clone_id: str,
-    payload_size: int,
-    frames: int = 0,
-) -> dict[str, str | int]:
-    return {
-        "clone_id": clone_id,
-        "payload_size": payload_size,
-        "frames": frames,
-        "status": "queued_for_embedding",
-    }
+    global _loop
+    run_async(dispose_engine())
+    with _loop_lock:
+        if _loop is not None and not _loop.is_closed():
+            _loop.close()
+            _loop = None
