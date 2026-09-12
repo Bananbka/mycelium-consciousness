@@ -1,25 +1,32 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.db.db import dispose_engine, get_db
+from api.config import validate_jwt_secret
+from api.deps import DatabaseSession
+from api.routers import admin, auth, home, memories, profiles
+from shared.db.db import dispose_engine
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    validate_jwt_secret()
     yield
     await dispose_engine()
 
 
 app = FastAPI(title="Mycelium Consciousness Admin API", lifespan=lifespan)
-DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
+
+app.include_router(auth.router)
+app.include_router(home.router)
+app.include_router(profiles.router)
+app.include_router(memories.router)
+app.include_router(admin.router)
 
 
-@app.get("/health")
+@app.get("/health", tags=["health"])
 async def health_check(db: DatabaseSession):
     result = await db.execute(text("SELECT 1"))
     db_status = "ok" if result.scalar() == 1 else "error"
