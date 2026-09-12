@@ -12,6 +12,22 @@ dev = [
     "pre-commit>=4.5.1",
     "ruff>=0.14.8",
 ]
+# Tests span api, celery_worker, grpc_ingester and shared, so they belong to
+# the workspace rather than to any single member package.
+test = [
+    "httpx>=0.28.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+# asyncpg binds a connection to the loop that created it, so the session-scoped
+# engine and the tests must share one loop.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.ruff]
 line-length = 88
@@ -26,3 +42,4 @@ known-first-party = ["api", "celery_worker", "grpc_ingester", "shared"]
 
 [tool.ruff.lint.per-file-ignores]
 "shared/migrations/versions/*" = ["E501"]
+"tests/*" = ["ARG001"]

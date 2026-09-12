@@ -16,7 +16,7 @@ jobs:
           enable-cache: true
 
       - name: Install workspace
-        run: uv sync --all-packages --dev --frozen
+        run: uv sync --all-packages --dev --group codegen --group test --frozen
 
       - name: Generate protobuf stubs
         run: uv run --with grpcio-tools python -m shared.protos.generate
@@ -39,6 +39,16 @@ jobs:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: secretpassword
           POSTGRES_DB: clone_memory_db
+
+      - name: Tests
+        run: uv run pytest
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: secretpassword
+          POSTGRES_DB: clone_memory_db
+          JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
+          GEMINI_API_KEY: ""
 
     services:
       db:
