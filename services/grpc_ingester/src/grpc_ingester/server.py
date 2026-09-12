@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 import grpc
 
 from grpc_ingester.dispatch import dispatch_batch
-from grpc_ingester.handlers import IngestionStats, iter_micro_batches
+from grpc_ingester.handlers import (
+    IngestionStats,
+    MixedCloneStreamError,
+    iter_micro_batches,
+)
 from shared.protos import memory_stream_pb2, memory_stream_pb2_grpc
 
 logger = logging.getLogger(__name__)
@@ -23,6 +28,10 @@ class MemoryStreamService(memory_stream_pb2_grpc.MemoryStreamServicer):
         context: grpc.aio.ServicerContext,
     ) -> memory_stream_pb2.IngestionSummary:
         stats = IngestionStats()
+        started = time.monotonic()
+        batches = 0
+
+        logger.info("stream opened from %s", context.peer())
 
         try:
             async for batch in iter_micro_batches(request_iterator, stats):
@@ -30,7 +39,22 @@ class MemoryStreamService(memory_stream_pb2_grpc.MemoryStreamServicer):
                     clone_id=batch.clone_id,
                     payload_size=batch.payload_size,
                     frames=batch.frames,
+                    contents=batch.contents,
+                    captured_at_unix_ms=batch.captured_at_unix_ms,
                 )
+                batches += 1
+                # Per batch, not per frame: one line per frame would be noise
+                # at ingestion volume.
+                logger.debug(
+                    "dispatched batch %d for clone_id=%s frames=%d bytes=%d",
+                    batches,
+                    batch.clone_id,
+                    batch.frames,
+                    batch.payload_size,
+                )
+        except MixedCloneStreamError as exc:
+            logger.warning("rejecting mixed-clone stream: %s", exc)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         except Exception:
             logger.exception(
                 "stream aborted for clone_id=%s after %d frames",
@@ -38,6 +62,16 @@ class MemoryStreamService(memory_stream_pb2_grpc.MemoryStreamServicer):
                 stats.frames_received,
             )
             await context.abort(grpc.StatusCode.INTERNAL, "ingestion failed")
+
+        elapsed = time.monotonic() - started
+        logger.info(
+            "stream closed clone_id=%s frames=%d bytes=%d batches=%d in %.3fs",
+            stats.clone_id,
+            stats.frames_received,
+            stats.bytes_received,
+            batches,
+            elapsed,
+        )
 
         return memory_stream_pb2.IngestionSummary(
             clone_id=stats.clone_id,
