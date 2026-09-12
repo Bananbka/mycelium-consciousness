@@ -1,13 +1,62 @@
+import enum
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from shared.db.db import Base
 
 EMBEDDING_DIM = 768
+
+
+class UserRole(enum.StrEnum):
+    ADMIN = "admin"
+    CLONE = "clone"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[UserRole] = mapped_column(
+        Enum(
+            UserRole,
+            name="user_role",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        default=UserRole.CLONE,
+        server_default=UserRole.CLONE.value,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="true",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    profile: Mapped["CloneProfile | None"] = relationship(
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class CloneProfile(Base):
@@ -20,13 +69,24 @@ class CloneProfile(Base):
         default="active",
         server_default="active",
     )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
 
-    memories: Mapped[list["MemoryChunk"]] = relationship(back_populates="clone")
+    user: Mapped["User | None"] = relationship(back_populates="profile")
+    memories: Mapped[list["MemoryChunk"]] = relationship(
+        back_populates="clone",
+        cascade="all, delete-orphan",
+        # The FK already declares ON DELETE CASCADE; without this SQLAlchemy
+        # would SELECT every chunk into Python and emit one DELETE per row.
+        passive_deletes=True,
+    )
 
 
 class MemoryChunk(Base):
