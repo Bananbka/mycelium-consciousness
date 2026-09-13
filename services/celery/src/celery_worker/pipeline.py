@@ -31,30 +31,41 @@ def _captured_at(unix_ms: int | None) -> datetime | None:
 
 async def store_batch(
     session: AsyncSession,
-    clone_designation: str,
-    contents: list[str],
+    owner_user_id: int,
+    payloads: list[bytes],
     captured_at_unix_ms: list[int] | None = None,
 ) -> dict[str, str | int]:
     """Resolve the clone, embed each frame, and persist the chunks."""
     profile = await session.scalar(
-        select(CloneProfile).where(CloneProfile.designation == clone_designation)
+        select(CloneProfile).where(CloneProfile.user_id == owner_user_id)
     )
 
     if profile is None:
-        # Never auto-create: the stream is unauthenticated, so an unknown
-        # designation must not be able to conjure a clone registry entry.
-        logger.warning("rejecting batch for unknown clone %r", clone_designation)
+        logger.warning(
+            "rejecting batch: no clone profile linked to user_id=%r", owner_user_id
+        )
         return {
-            "clone_id": clone_designation,
+            "owner_user_id": owner_user_id,
             "stored": 0,
-            "status": "rejected_unknown_clone",
+            "status": "no_clone_profile",
         }
 
     timestamps = captured_at_unix_ms or []
     embedder = get_embedder()
     stored = 0
 
-    for index, content in enumerate(contents):
+    for index, payload in enumerate(payloads):
+        try:
+            content = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            logger.warning(
+                "dropping frame %d for user_id=%r: not valid UTF-8 (%d bytes)",
+                index,
+                owner_user_id,
+                len(payload),
+            )
+            continue
+
         text = content.strip()
         if not text:
             continue
@@ -74,4 +85,4 @@ async def store_batch(
         stored += 1
 
     await session.commit()
-    return {"clone_id": clone_designation, "stored": stored, "status": "stored"}
+    return {"owner_user_id": owner_user_id, "stored": stored, "status": "stored"}

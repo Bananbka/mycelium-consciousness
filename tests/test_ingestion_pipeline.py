@@ -37,22 +37,22 @@ async def test_batches_flush_at_the_frame_threshold():
     assert stats.frames_received == 150
 
 
-async def test_batch_carries_decoded_contents():
+async def test_batch_carries_the_raw_payload_bytes():
     """The payload must survive to the worker, not just its byte count."""
     stats = IngestionStats()
     batches = [b async for b in iter_micro_batches(_frames(3), stats)]
 
-    assert batches[0].contents == ["frame 0", "frame 1", "frame 2"]
+    assert batches[0].payloads == [b"frame 0", b"frame 1", b"frame 2"]
     assert batches[0].payload_size == sum(len(f"frame {i}") for i in range(3))
 
 
-async def test_non_utf8_payload_does_not_crash_the_stream():
+async def test_non_utf8_payload_passes_through_the_handler_unchanged():
     async def binary():
         yield FakeFrame("clone-alpha", 1, b"\xff\xfe invalid utf8")
 
     stats = IngestionStats()
     batches = [b async for b in iter_micro_batches(binary(), stats)]
-    assert len(batches[0].contents) == 1
+    assert batches[0].payloads == [b"\xff\xfe invalid utf8"]
 
 
 async def test_store_batch_persists_chunks_against_the_right_clone(session, clone_user):
@@ -61,7 +61,9 @@ async def test_store_batch_persists_chunks_against_the_right_clone(session, clon
     )
 
     result = await store_batch(
-        session, "clone-alpha", ["airlock code is seven four two", "bay needs nitrogen"]
+        session,
+        clone_user.id,
+        [b"airlock code is seven four two", b"bay needs nitrogen"],
     )
 
     assert result["status"] == "stored"
@@ -79,28 +81,46 @@ async def test_store_batch_persists_chunks_against_the_right_clone(session, clon
     assert all(r.embedding is not None for r in rows)
 
 
-async def test_store_batch_rejects_an_unknown_clone(session):
-    """The gRPC stream is unauthenticated, so it must not create profiles."""
-    result = await store_batch(session, "not-a-registered-clone", ["some memory"])
+async def test_store_batch_rejects_a_user_with_no_clone_profile(session, admin_user):
+    """The token identifies a user; an admin has no profile to write into."""
+    result = await store_batch(session, admin_user.id, [b"some memory"])
 
-    assert result["status"] == "rejected_unknown_clone"
+    assert result["status"] == "no_clone_profile"
     assert result["stored"] == 0
 
-    count = await session.scalar(
-        select(CloneProfile).where(CloneProfile.designation == "not-a-registered-clone")
-    )
+    count = await session.scalar(select(MemoryChunk))
     assert count is None
 
 
+async def test_store_batch_rejects_an_unknown_user_id(session):
+    result = await store_batch(session, 999_999_999, [b"some memory"])
+
+    assert result["status"] == "no_clone_profile"
+    assert result["stored"] == 0
+
+
 async def test_store_batch_skips_blank_frames(session, clone_user):
-    result = await store_batch(session, "clone-alpha", ["real memory", "   ", ""])
+    result = await store_batch(session, clone_user.id, [b"real memory", b"   ", b""])
 
     assert result["stored"] == 1
 
 
-@pytest.mark.parametrize("contents", [[], None])
-async def test_store_batch_handles_an_empty_batch(session, clone_user, contents):
-    result = await store_batch(session, "clone-alpha", contents or [])
+async def test_store_batch_drops_a_non_utf8_frame_instead_of_corrupting_it(
+    session, clone_user
+):
+    result = await store_batch(
+        session, clone_user.id, [b"\xff\xfe not valid utf8", b"a real memory"]
+    )
+
+    assert result["stored"] == 1
+
+    rows = (await session.scalars(select(MemoryChunk))).all()
+    assert [r.content for r in rows] == ["a real memory"]
+
+
+@pytest.mark.parametrize("payloads", [[], None])
+async def test_store_batch_handles_an_empty_batch(session, clone_user, payloads):
+    result = await store_batch(session, clone_user.id, payloads or [])
     assert result["stored"] == 0
 
 
@@ -113,7 +133,7 @@ async def test_a_stream_may_omit_clone_id_after_the_first_frame():
     batches = [b async for b in iter_micro_batches(mixed(), stats)]
 
     assert batches[0].clone_id == "clone-alpha"
-    assert batches[0].contents == ["first", "second"]
+    assert batches[0].payloads == [b"first", b"second"]
 
 
 async def test_changing_clone_id_mid_stream_is_rejected():
@@ -143,7 +163,7 @@ async def test_stream_pins_to_the_first_frame_that_names_a_clone():
     batches = [b async for b in iter_micro_batches(frames(), stats)]
 
     assert batches[0].clone_id == "clone-alpha"
-    assert batches[0].contents == ["first", "second", "third"]
+    assert batches[0].payloads == [b"first", b"second", b"third"]
     assert stats.clone_id == "clone-alpha"
 
 
@@ -151,7 +171,7 @@ async def test_capture_timestamps_reach_the_stored_rows(session, clone_user):
     captured = [1_700_000_000_000, 1_700_000_060_000]
 
     result = await store_batch(
-        session, "clone-alpha", ["first memory", "second memory"], captured
+        session, clone_user.id, [b"first memory", b"second memory"], captured
     )
     assert result["stored"] == 2
 
@@ -171,7 +191,7 @@ async def test_capture_timestamps_reach_the_stored_rows(session, clone_user):
 async def test_missing_capture_timestamp_falls_back_to_the_server_default(
     session, clone_user
 ):
-    result = await store_batch(session, "clone-alpha", ["no timestamp"], [0])
+    result = await store_batch(session, clone_user.id, [b"no timestamp"], [0])
     assert result["stored"] == 1
 
     row = await session.scalar(
@@ -184,7 +204,7 @@ async def test_blank_frames_do_not_desynchronise_timestamps(session, clone_user)
     """The blank frame is skipped, but the survivor keeps its own timestamp."""
     captured = [1_700_000_000_000, 1_700_000_060_000]
 
-    await store_batch(session, "clone-alpha", ["   ", "kept"], captured)
+    await store_batch(session, clone_user.id, [b"   ", b"kept"], captured)
 
     row = await session.scalar(select(MemoryChunk).where(MemoryChunk.content == "kept"))
     assert row.timestamp == datetime.fromtimestamp(captured[1] / 1000, tz=UTC)

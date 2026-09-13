@@ -119,3 +119,22 @@ Admins cannot self-register; seed one out of band:
 ```bash
 uv run --package api seed-admin ops@example.com <password>
 ```
+
+## gRPC authentication
+
+`StreamMemories` requires the same bearer token as the REST API, attached as
+call metadata rather than a per-message field:
+
+```
+authorization: Bearer <access_token>
+```
+
+A missing or invalid token aborts the call with `UNAUTHENTICATED`; a
+validly signed token whose role is not `clone` aborts with
+`PERMISSION_DENIED` — the same 401/403 distinction the REST API makes,
+translated to gRPC's status codes. The memory owner is always the token's
+subject, resolved server-side to that user's `CloneProfile`; the `clone_id`
+field on `MemoryFrame` is never used to decide where a frame is written, so a
+caller cannot forge another clone's identity by naming it. The transport
+itself is still plaintext (`add_insecure_port`) — this closes the
+identity-forgery gap, not the eavesdropping one.

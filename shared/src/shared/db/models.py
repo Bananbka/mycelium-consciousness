@@ -1,4 +1,3 @@
-import enum
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
@@ -16,13 +15,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from shared.db.db import Base
+from shared.roles import UserRole
 
 EMBEDDING_DIM = 768
-
-
-class UserRole(enum.StrEnum):
-    ADMIN = "admin"
-    CLONE = "clone"
 
 
 class User(Base):

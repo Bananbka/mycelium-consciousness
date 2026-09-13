@@ -11,22 +11,26 @@ TASK_QUEUE = os.getenv("CELERY_TASK_QUEUE", "memory_batches")
 
 _client = Celery("clone_memory_ingester", broker=BROKER_URL)
 
+_client.conf.task_serializer = "msgpack"
+_client.conf.accept_content = ["msgpack"]
+_client.conf.result_serializer = "msgpack"
+
 
 async def dispatch_batch(
-    clone_id: str,
+    owner_user_id: int,
     payload_size: int,
     frames: int,
-    contents: list[str] | None = None,
+    payloads: list[bytes] | None = None,
     captured_at_unix_ms: list[int] | None = None,
 ) -> None:
     await asyncio.to_thread(
         _client.send_task,
         TASK_NAME,
         kwargs={
-            "clone_id": clone_id,
+            "owner_user_id": owner_user_id,
             "payload_size": payload_size,
             "frames": frames,
-            "contents": contents or [],
+            "payloads": payloads or [],
             "captured_at_unix_ms": captured_at_unix_ms or [],
         },
         queue=TASK_QUEUE,
