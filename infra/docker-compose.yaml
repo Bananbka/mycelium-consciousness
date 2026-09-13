@@ -96,8 +96,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    # POSTGRES_HOST_PORT is the host-side port only. POSTGRES_PORT stays 5432
-    # because that is the port services use inside the compose network.
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:

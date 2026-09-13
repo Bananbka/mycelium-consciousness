@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "celery>=5.6.0",
+    "msgpack>=1.0.8",
     "redis>=7.1.0",
     "shared",
 ]

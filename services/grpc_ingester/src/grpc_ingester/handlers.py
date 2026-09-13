@@ -37,7 +37,7 @@ class MicroBatch:
     frames: int
     payload_size: int
     captured_at_unix_ms: list[int] = field(default_factory=list)
-    contents: list[str] = field(default_factory=list)
+    payloads: list[bytes] = field(default_factory=list)
 
 
 async def iter_micro_batches(
@@ -50,7 +50,7 @@ async def iter_micro_batches(
     frames = 0
     payload_size = 0
     timestamps: list[int] = []
-    contents: list[str] = []
+    payloads: list[bytes] = []
     stream_clone_id: str | None = None
 
     async for frame in request_iterator:
@@ -74,9 +74,7 @@ async def iter_micro_batches(
         frames += 1
         payload_size += len(payload)
         timestamps.append(getattr(frame, "captured_at_unix_ms", 0))
-        # Decoded here because the Celery broker serialises kwargs as JSON,
-        # which cannot carry raw bytes.
-        contents.append(payload.decode("utf-8", errors="replace"))
+        payloads.append(payload)
 
         if frames >= max_frames or payload_size >= max_bytes:
             yield MicroBatch(
@@ -84,12 +82,12 @@ async def iter_micro_batches(
                 frames,
                 payload_size,
                 timestamps,
-                contents,
+                payloads,
             )
             frames = 0
             payload_size = 0
             timestamps = []
-            contents = []
+            payloads = []
 
     if frames:
-        yield MicroBatch(stats.clone_id, frames, payload_size, timestamps, contents)
+        yield MicroBatch(stats.clone_id, frames, payload_size, timestamps, payloads)

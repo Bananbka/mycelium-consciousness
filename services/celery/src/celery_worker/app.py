@@ -24,6 +24,9 @@ app = Celery(
     include=["celery_worker.tasks"],
 )
 app.conf.task_default_queue = TASK_QUEUE
+app.conf.task_serializer = "msgpack"
+app.conf.accept_content = ["msgpack"]
+app.conf.result_serializer = "msgpack"
 app.conf.worker_prefetch_multiplier = 1
 app.conf.task_acks_late = True
 app.conf.broker_connection_retry_on_startup = True
