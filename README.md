@@ -117,6 +117,38 @@ entry. The source must first be marked non-`"active"` (`PATCH
 admin) — resurrecting from a clone that is still active is rejected with
 409, so a second identity can never fork off memory that is still live.
 
+## API and high-load scenario
+
+Interactive specification (generated from the code, always current):
+Swagger UI at `http://localhost/docs`, OpenAPI JSON at
+`http://localhost/openapi.json`. Errors use standard status codes (401
+unauthenticated, 403 wrong role, 404 not yours / not found, 409 state
+conflict, 422 validation, 503 degraded `/health`).
+
+| Area | Endpoint | Operation |
+| --- | --- | --- |
+| Auth | `POST /auth/register`, `POST /auth/login`, `GET /auth/me` | create account, issue JWT, read self |
+| Profiles | `GET /profiles/me`, `PATCH /profiles/me`, `GET /profiles`, `GET/PATCH /profiles/{id}` | read / update clone profile |
+| Memory | `POST /memories/write` | create: append one memory frame (202) |
+| Memory | `GET /memories/stream/status` | read: frames buffered in Redis |
+| Backups | `GET /memories/backups`, `GET /memories/backups/{id}` | read backup history / one backup |
+| Backups | `POST /memories/backups/{id}/restore`, `POST /memories/resurrect` | business logic: restore, fork a dead clone |
+| Admin | `GET /admin/users`, `/admin/clones`, `/admin/stats`, `PATCH /admin/clones/{id}/subscription`, `POST /admin/clones/{id}/rollup`, `POST /admin/users/{id}/deactivate` | operate the registry (deactivation is a soft delete) |
+| Ops | `GET /health` | readiness: Postgres, Redis, MinIO |
+
+Domain entities and relations: `users` 1—1 `clone_profiles` 1—1
+`memory_buffers` (live, not yet archived) and 1—N `memory_backups`
+(archived periods, payload in MinIO).
+
+**High-load scenario.** Many clones each stream `POST /memories/write` at a
+high rate. Per request that is a JWT check, an authenticated Postgres lookup
+and one Redis `XADD`; behind it the heaviest work is background: the flush
+(decode, append and re-encode a growing `bytea` under a row lock, every 60 s
+or at `MEMORY_STREAM_MAXLEN`) and the rollup (upload to MinIO plus metadata
+insert per due clone). This is the scenario the load tests (lab 5, scenario B
+and the mixed workflow C) drive, and the one the bottleneck analysis
+([`docs/bottleneck-analysis.md`](docs/bottleneck-analysis.md)) reasons about.
+
 ## Development
 
 Install dependencies and run quality checks:
@@ -283,6 +315,21 @@ for i in 1 2 3 4; do curl -si http://localhost/health | grep -i x-instance-id; d
 `GET /profiles/me` and `PATCH /profiles/{id}` through nginx (`least_conn`, no
 `ip_hash`) and prints the serving instance for each call plus the status read
 back, which must match what was just written regardless of instance.
+
+Manual check with plain cURL (each response shows which instance served it):
+
+```bash
+curl -s -X POST http://localhost/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"changeme-123","designation":"clone-me"}'
+TOKEN=$(curl -s -X POST http://localhost/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"changeme-123"}' | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+curl -si http://localhost/profiles/me -H "Authorization: Bearer $TOKEN" | grep -i -e x-instance-id -e status   # instance A
+curl -si -X PATCH http://localhost/profiles/1 -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"status":"deceased"}' | grep -i x-instance-id           # instance B
+curl -s http://localhost/profiles/me -H "Authorization: Bearer $TOKEN"                            # shows the new status
+```
+
+(Replace the profile id `1` with the `id` returned by `GET /profiles/me`.)
 
 ### Instance-loss scenario
 
@@ -519,6 +566,7 @@ bash scripts/run_load_tests.sh matrix    # 3 scenarios x load levels
 bash scripts/run_load_tests.sh low       # 2 and 5 VUs (locates the knee)
 bash scripts/run_load_tests.sh scaling   # 1 vs 3 instances
 bash scripts/run_load_tests.sh cache     # scenario A with the cache bypassed
+bash scripts/run_load_tests.sh ramp      # one live staged run 10->25->50->100->200 VUs
 uv run --with matplotlib python load-tests/summarize.py
 ```
 
@@ -652,10 +700,19 @@ Primary Bottleneck: API worker CPU (~220% per api container vs Postgres 45%)
 
 ### Caveats and theory
 
-- **Noise.** Each point is one 30 s run. Identical configurations differed by
-  ~15% (scenario A at 100 VUs: 258 and 214 RPS in two runs), and some
-  non-monotonic points (A at 25 VUs) are noise-level. Trends and orders of
-  magnitude are trustworthy, single-digit percentages are not.
+- **Noise, and one result that disagrees.** Each point is one 30 s run.
+  Identical configurations differed by ~15% (scenario A at 100 VUs: 258 and
+  214 RPS in two runs). Worse, the single staged run
+  (`bash scripts/run_load_tests.sh ramp`, scenario B, 10 → 25 → 50 → 100 →
+  200 VUs in 30 s stages, 0% errors) averaged **385 RPS with p99 823 ms** over
+  the whole ramp, clearly above the constant-VU figures for the same scenario
+  (211–314 RPS, p99 up to 2.9 s at 200 VUs). Its aggregate mixes the low-load
+  stages in, so it is not directly comparable, but it does show that
+  run-to-run and host-state variance on this shared laptop can reach tens of
+  percent. Treat the baseline card as indicative: the qualitative findings
+  (early knee, API-CPU-bound, flat throughput, growing tail) are consistent,
+  the exact RPS ceiling is not pinned down and should be re-measured on a quiet,
+  dedicated machine with several repetitions per point.
 - **Coordinated omission.** This is a closed-loop test: a VU waits for its
   response before sending the next request, so when the server stalls the
   generator silently stops sending and the missing (slow) requests are never

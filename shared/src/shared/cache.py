@@ -81,6 +81,7 @@ async def invalidate_backups(clone_id: int) -> int:
         keys = [key async for key in client.scan_iter(match=pattern)]
         if keys:
             await client.delete(*keys)
+        logger.info("cache invalidated clone_id=%d keys=%d", clone_id, len(keys))
         return len(keys)
     except Exception:
         logger.warning("cache unavailable on invalidate %s", pattern)

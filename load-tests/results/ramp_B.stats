@@ -1,0 +1,9 @@
+suspicious_hofstadter cpu=5.45% mem=50.12MiB / 7.413GiB
+infra-api-2 cpu=0.42% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=17.50% mem=242.3MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.22% mem=777.4MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.4MiB / 7.413GiB
+infra-nginx-1 cpu=2.23% mem=10.31MiB / 7.413GiB
+clone_redis cpu=1.91% mem=7.992MiB / 7.413GiB
+clone_postgres cpu=4.60% mem=144.9MiB / 7.413GiB
+clone_minio cpu=7.01% mem=126.8MiB / 7.413GiB

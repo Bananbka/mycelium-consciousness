@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lab 5 runner. Usage: scripts/run_load_tests.sh <matrix|scaling|cache|prep>
+# Lab 5 runner. Usage: scripts/run_load_tests.sh <matrix|scaling|cache|prep|low|extra|ramp>
 # Results land in load-tests/results/*.json (k6 --summary-export).
 export MSYS_NO_PATHCONV=1
 set -euo pipefail
@@ -54,6 +54,8 @@ extra)    # finer low-load level + re-measure cache runs with per-table counters
 low)      # resolve the saturation knee: very low load levels
   scale 2
   for scen in A B C; do for vus in 2 5; do k6run "matrix_${scen}_${vus}" "$scen" "$vus"; done; done ;;
+ramp)     # one live staged run 10->25->50->100->200 VUs (defence demo), scenario B by default
+  scale 2; k6run "ramp_${SCEN:-B}" "${SCEN:-B}" 200 -e RAMP=1 -e STAGE="${STAGE:-30s}" ;;
 scaling)  # 1 vs 3 instances (2 comes from the matrix), 100 VUs
   for n in 1 3; do scale "$n"
     for scen in A B; do k6run "scale${n}_${scen}_100" "$scen" 100; done

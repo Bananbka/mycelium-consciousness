@@ -2,6 +2,7 @@
 //   A  read-intensive   GET /memories/backups (cache layer + Postgres read)
 //   B  write-intensive  POST /memories/write   (Redis XADD hot path)
 //   C  complex workflow read profile -> 3 writes -> compute status -> read backups
+// -e RAMP=1 replaces the constant level with one staged ramp-up run.
 // Each run = warm-up phase (untimed) + constant-VU main phase (measured).
 import http from 'k6/http';
 import { check } from 'k6';
@@ -12,6 +13,8 @@ const VUS = parseInt(__ENV.VUS || '10');
 const DURATION = __ENV.DURATION || '30s';
 const WARMUP = __ENV.WARMUP || '10s';
 const NOCACHE = __ENV.NOCACHE === '1';
+const RAMP = __ENV.RAMP === '1'; // one staged run: 10 -> 25 -> 50 -> 100 -> 200 VUs
+const STAGE = __ENV.STAGE || '30s';
 const USERS = 50;
 const JSON_H = { 'Content-Type': 'application/json' };
 
@@ -26,8 +29,12 @@ export const options = SCENARIO === 'PREP'
       scenarios: {
         warmup: { executor: 'constant-vus', vus: Math.max(2, Math.ceil(VUS / 10)),
           duration: WARMUP, exec: 'run', tags: { phase: 'warmup' } },
-        main: { executor: 'constant-vus', vus: VUS, duration: DURATION,
-          startTime: WARMUP, exec: 'run', tags: { phase: 'main' } },
+        main: RAMP
+          ? { executor: 'ramping-vus', startVUs: 0, exec: 'run', startTime: WARMUP,
+              stages: [10, 25, 50, 100, 200].map((target) => ({ duration: STAGE, target })),
+              tags: { phase: 'main' } }
+          : { executor: 'constant-vus', vus: VUS, duration: DURATION,
+              startTime: WARMUP, exec: 'run', tags: { phase: 'main' } },
       },
       thresholds: measured,
       summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
