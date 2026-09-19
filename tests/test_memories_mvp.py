@@ -1,97 +1,77 @@
-"""MVP business logic: memory capture and semantic recall."""
+"""MVP business logic: the fast write path and admin registry counts."""
 
 from __future__ import annotations
 
+from shared import streams
 
-async def test_created_memory_is_returned_in_the_listing(client, clone_headers):
-    created = await client.post(
-        "/memories",
+
+async def test_write_is_accepted_and_lands_in_the_stream(
+    client, clone_headers, clone_user
+):
+    response = await client.post(
+        "/memories/write",
         headers=clone_headers,
         json={"content": "the airlock code is seven four two"},
     )
-    assert created.status_code == 201
+    assert response.status_code == 202
+    assert response.json()["status"] == "recorded"
 
-    listing = await client.get("/memories", headers=clone_headers)
-    assert listing.status_code == 200
-    assert listing.json()[0]["content"] == "the airlock code is seven four two"
-
-
-async def test_search_ranks_the_matching_memory_first(client, clone_headers):
-    memories = [
-        "the airlock code is seven four two",
-        "hydroponics bay needs more nitrogen",
-        "captain vela prefers black coffee",
-    ]
-    for content in memories:
-        response = await client.post(
-            "/memories", headers=clone_headers, json={"content": content}
-        )
-        assert response.status_code == 201
-
-    response = await client.get(
-        "/memories/search",
-        headers=clone_headers,
-        params={"q": "hydroponics bay nitrogen"},
-    )
-
-    assert response.status_code == 200
-    results = response.json()
-    assert results
-    assert results[0]["content"] == "hydroponics bay needs more nitrogen"
-    assert results[0]["similarity"] > 0
+    profile_id = clone_user.profile.id
+    entries = await streams.read_all(profile_id)
+    assert len(entries) == 1
+    assert entries[0][1]["content"] == "the airlock code is seven four two"
 
 
-async def test_search_respects_the_limit(client, clone_headers):
-    for index in range(5):
-        await client.post(
-            "/memories",
-            headers=clone_headers,
-            json={"content": f"memory number {index}"},
-        )
-
-    response = await client.get(
-        "/memories/search",
-        headers=clone_headers,
-        params={"q": "memory", "limit": 2},
-    )
-
-    assert response.status_code == 200
-    assert len(response.json()) == 2
-
-
-async def test_search_returns_empty_when_the_clone_has_no_memories(
-    client, clone_headers
+async def test_stream_status_reports_the_buffered_count(
+    client, clone_headers, clone_user
 ):
-    response = await client.get(
-        "/memories/search",
-        headers=clone_headers,
-        params={"q": "anything at all"},
-    )
+    for i in range(5):
+        await client.post(
+            "/memories/write", headers=clone_headers, json={"content": f"noise {i}"}
+        )
+
+    response = await client.get("/memories/stream/status", headers=clone_headers)
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json()["buffered_entries"] == 5
 
 
 async def test_empty_content_is_rejected(client, clone_headers):
     response = await client.post(
-        "/memories", headers=clone_headers, json={"content": ""}
+        "/memories/write", headers=clone_headers, json={"content": ""}
     )
     assert response.status_code == 422
 
 
-async def test_admin_stats_count_the_registry(
-    client, admin_headers, clone_headers, clone_user
-):
-    await client.post(
-        "/memories", headers=clone_headers, json={"content": "a stored memory"}
+async def test_blank_content_is_rejected(client, clone_headers):
+    response = await client.post(
+        "/memories/write", headers=clone_headers, json={"content": "   "}
     )
+    assert response.status_code == 422
 
+
+async def test_write_uses_the_callers_own_profile_regardless_of_body(
+    client, clone_headers, clone_user, other_clone_user
+):
+    response = await client.post(
+        "/memories/write",
+        headers=clone_headers,
+        json={"content": "mine", "clone_id": other_clone_user.profile.id},
+    )
+    assert response.status_code == 202
+
+    own_entries = await streams.read_all(clone_user.profile.id)
+    other_entries = await streams.read_all(other_clone_user.profile.id)
+    assert len(own_entries) == 1
+    assert len(other_entries) == 0
+
+
+async def test_admin_stats_count_the_registry(client, admin_headers, clone_user):
     response = await client.get("/admin/stats", headers=admin_headers)
     assert response.status_code == 200
 
     stats = response.json()
     assert stats["users"] >= 2
     assert stats["clones"] >= 1
-    assert stats["memories"] >= 1
 
 
 async def test_admin_can_deactivate_a_clone(client, admin_headers, clone_user):
@@ -109,42 +89,63 @@ async def test_admin_cannot_deactivate_themselves(client, admin_headers, admin_u
     assert response.status_code == 400
 
 
-async def test_blank_content_is_rejected(client, clone_headers):
-    """A zero vector makes cosine distance NaN, which is invalid JSON."""
+async def test_clone_cannot_deactivate_another_user(
+    client, clone_headers, other_clone_user
+):
     response = await client.post(
-        "/memories", headers=clone_headers, json={"content": "   "}
+        f"/admin/users/{other_clone_user.id}/deactivate", headers=clone_headers
     )
-    assert response.status_code == 422
+    assert response.status_code == 403
 
 
-async def test_content_is_stored_stripped(client, clone_headers):
-    response = await client.post(
-        "/memories", headers=clone_headers, json={"content": "  padded memory  "}
-    )
-    assert response.status_code == 201
-    assert response.json()["content"] == "padded memory"
-
-
-async def test_search_never_returns_nan_similarity(client, clone_headers):
-    await client.post(
-        "/memories", headers=clone_headers, json={"content": "a real memory"}
-    )
-    response = await client.get(
-        "/memories/search", headers=clone_headers, params={"q": "real memory"}
+async def test_admin_can_change_a_clones_subscription_tier(
+    client, admin_headers, clone_user
+):
+    response = await client.patch(
+        f"/admin/clones/{clone_user.profile.id}/subscription",
+        headers=admin_headers,
+        json={"subscription_tier": "premium"},
     )
     assert response.status_code == 200
-    for item in response.json():
-        assert item["similarity"] == item["similarity"], "similarity is NaN"
+    assert response.json()["subscription_tier"] == "premium"
 
 
-async def test_listing_is_stable_across_identical_timestamps(client, clone_headers):
-    """A whole micro-batch shares one timestamp; id must break the tie."""
-    for i in range(10):
-        await client.post(
-            "/memories", headers=clone_headers, json={"content": f"memory {i}"}
-        )
+async def test_clone_cannot_change_their_own_subscription_tier(
+    client, clone_headers, clone_user
+):
+    response = await client.patch(
+        f"/admin/clones/{clone_user.profile.id}/subscription",
+        headers=clone_headers,
+        json={"subscription_tier": "premium"},
+    )
+    assert response.status_code == 403
 
-    first = await client.get("/memories", headers=clone_headers, params={"limit": 5})
-    second = await client.get("/memories", headers=clone_headers, params={"limit": 5})
 
-    assert [m["id"] for m in first.json()] == [m["id"] for m in second.json()]
+async def test_admin_can_force_a_rollup(client, admin_headers, clone_user, monkeypatch):
+    def fake_force_rollup_clone(clone_id: int, timeout: float = 15.0) -> dict:
+        assert clone_id == clone_user.profile.id
+        return {"clone_id": clone_id, "status": "backed_up", "entry_count": 3}
+
+    monkeypatch.setattr("api.routers.admin.force_rollup_clone", fake_force_rollup_clone)
+
+    response = await client.post(
+        f"/admin/clones/{clone_user.profile.id}/rollup", headers=admin_headers
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "clone_id": clone_user.profile.id,
+        "status": "backed_up",
+        "entry_count": 3,
+    }
+
+
+async def test_clone_cannot_trigger_a_rollup(client, clone_headers, clone_user):
+    response = await client.post(
+        f"/admin/clones/{clone_user.profile.id}/rollup", headers=clone_headers
+    )
+    assert response.status_code == 403
+
+
+async def test_force_rollup_on_a_missing_clone_is_404(client, admin_headers):
+    response = await client.post("/admin/clones/999999/rollup", headers=admin_headers)
+    assert response.status_code == 404

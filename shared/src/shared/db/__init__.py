@@ -6,14 +6,15 @@ from shared.db.db import (
     engine,
     get_db,
 )
-from shared.db.models import CloneProfile, MemoryChunk, User, UserRole
+from shared.db.models import CloneProfile, MemoryBackup, MemoryBuffer, User, UserRole
 
 __all__ = [
     "AsyncSessionLocal",
     "Base",
     "CloneProfile",
     "DATABASE_URL",
-    "MemoryChunk",
+    "MemoryBackup",
+    "MemoryBuffer",
     "User",
     "UserRole",
     "dispose_engine",

@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from celery.exceptions import TimeoutError as CeleryTimeoutError
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, select
 
 from api.deps import CurrentAdmin, DatabaseSession
-from api.schemas import MemoryResponse, ProfileResponse, UserResponse
-from shared.db.models import CloneProfile, MemoryChunk, User
+from api.schemas import (
+    BackupResponse,
+    ProfileResponse,
+    RollupTriggerResponse,
+    SubscriptionUpdateRequest,
+    UserResponse,
+)
+from api.tasks import force_rollup_clone
+from shared.db.models import CloneProfile, MemoryBackup, User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -32,20 +41,61 @@ async def list_clones(
     return list(result.scalars().all())
 
 
-@router.get("/clones/{profile_id}/memories", response_model=list[MemoryResponse])
-async def list_clone_memories(
+@router.patch("/clones/{profile_id}/subscription", response_model=ProfileResponse)
+async def update_subscription(
+    profile_id: int,
+    payload: SubscriptionUpdateRequest,
+    _admin: CurrentAdmin,
+    db: DatabaseSession,
+) -> CloneProfile:
+    profile = await db.get(CloneProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    profile.subscription_tier = payload.subscription_tier
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
+@router.get("/clones/{profile_id}/backups", response_model=list[BackupResponse])
+async def list_clone_backups(
     profile_id: int,
     _admin: CurrentAdmin,
     db: DatabaseSession,
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[MemoryChunk]:
+) -> list[MemoryBackup]:
     result = await db.execute(
-        select(MemoryChunk)
-        .where(MemoryChunk.clone_id == profile_id)
-        .order_by(MemoryChunk.timestamp.desc(), MemoryChunk.id.desc())
+        select(MemoryBackup)
+        .where(MemoryBackup.clone_id == profile_id)
+        .order_by(MemoryBackup.period_end.desc())
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+@router.post("/clones/{profile_id}/rollup", response_model=RollupTriggerResponse)
+async def trigger_rollup(
+    profile_id: int,
+    _admin: CurrentAdmin,
+    db: DatabaseSession,
+) -> dict[str, str | int]:
+    """Roll up one clone immediately, bypassing its tier's due date.
+
+    For testing and ops use; the scheduled path is celery-beat's hourly (by
+    default) check against each clone's subscription tier.
+    """
+    profile = await db.get(CloneProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    try:
+        return await run_in_threadpool(force_rollup_clone, profile_id)
+    except CeleryTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Rollup did not complete in time",
+        ) from exc
 
 
 @router.post("/users/{user_id}/deactivate", response_model=UserResponse)
@@ -74,9 +124,9 @@ async def deactivate_user(
 async def registry_stats(_admin: CurrentAdmin, db: DatabaseSession) -> dict[str, int]:
     users = await db.scalar(select(func.count()).select_from(User))
     clones = await db.scalar(select(func.count()).select_from(CloneProfile))
-    memories = await db.scalar(select(func.count()).select_from(MemoryChunk))
+    backups = await db.scalar(select(func.count()).select_from(MemoryBackup))
     return {
         "users": users or 0,
         "clones": clones or 0,
-        "memories": memories or 0,
+        "backups": backups or 0,
     }

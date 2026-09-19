@@ -1,117 +1,150 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 
-from api.config import MEMORY_SEARCH_DEFAULT_LIMIT, MEMORY_SEARCH_MAX_LIMIT
-from api.deps import CurrentUser, DatabaseSession, OwnProfile
-from api.schemas import MemoryCreateRequest, MemoryResponse, MemorySearchResult
-from shared.db.models import MemoryChunk, UserRole
-from shared.embeddings import get_embedder
+from api.deps import DatabaseSession, OwnBackup, OwnProfile
+from api.schemas import (
+    BackupDetailResponse,
+    BackupResponse,
+    MemoryWriteRequest,
+    MemoryWriteResponse,
+    ResurrectRequest,
+)
+from api.tasks import flush_clone_stream
+from shared import backup_codec, object_storage, streams
+from shared.db.models import ACTIVE_STATUS, CloneProfile, MemoryBackup
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
-@router.post("", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
-async def create_memory(
-    payload: MemoryCreateRequest,
+@router.post(
+    "/write",
+    response_model=MemoryWriteResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def write_memory(
+    payload: MemoryWriteRequest,
     profile: OwnProfile,
-    db: DatabaseSession,
-) -> MemoryChunk:
-    """Store a memory against the caller's own clone.
-
-    clone_id comes from the authenticated profile, never from the request body,
-    so a clone cannot write into another clone's memory stream.
-    """
-    embedding = await get_embedder().embed(payload.content)
-    memory = MemoryChunk(
-        clone_id=profile.id,
-        content=payload.content,
-        embedding=embedding,
+) -> MemoryWriteResponse:
+    captured_at = payload.captured_at or datetime.now(UTC)
+    _, length = await streams.append_memory(
+        profile.id, payload.content, captured_at.isoformat()
     )
-    db.add(memory)
-    await db.commit()
-    await db.refresh(memory)
-    return memory
+    if length >= streams.MEMORY_STREAM_MAXLEN:
+        await run_in_threadpool(flush_clone_stream, profile.id)
+    return MemoryWriteResponse()
 
 
-@router.get("", response_model=list[MemoryResponse])
-async def list_own_memories(
+@router.get("/stream/status")
+async def stream_status(profile: OwnProfile) -> dict[str, int]:
+    return {"buffered_entries": await streams.stream_length(profile.id)}
+
+
+@router.get("/backups", response_model=list[BackupResponse])
+async def list_own_backups(
     profile: OwnProfile,
     db: DatabaseSession,
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[MemoryChunk]:
+) -> list[MemoryBackup]:
     result = await db.execute(
-        select(MemoryChunk)
-        .where(MemoryChunk.clone_id == profile.id)
-        # id breaks ties: func.now() is transaction start time, so a whole
-        # micro-batch shares one timestamp and the sort is otherwise unstable.
-        .order_by(MemoryChunk.timestamp.desc(), MemoryChunk.id.desc())
+        select(MemoryBackup)
+        .where(MemoryBackup.clone_id == profile.id)
+        .order_by(MemoryBackup.period_end.desc())
         .limit(limit)
     )
     return list(result.scalars().all())
 
 
-@router.get("/search", response_model=list[MemorySearchResult])
-async def search_own_memories(
-    profile: OwnProfile,
-    db: DatabaseSession,
-    q: str = Query(min_length=1, max_length=1024),
-    limit: int = Query(default=MEMORY_SEARCH_DEFAULT_LIMIT, ge=1),
-) -> list[MemorySearchResult]:
-    """Semantic search over the caller's own memories.
-
-    The clone_id filter is applied inside the query, so the ANN scan can never
-    surface another clone's memories regardless of ranking.
-    """
-    limit = min(limit, MEMORY_SEARCH_MAX_LIMIT)
-    query_vector = await get_embedder().embed(q)
-
-    # A zero vector has no direction, so cosine distance against it is NaN and
-    # would serialise as a bare NaN token that strict JSON parsers reject.
-    if not any(query_vector):
-        return []
-
-    distance = MemoryChunk.embedding.cosine_distance(query_vector)
-
-    result = await db.execute(
-        select(MemoryChunk, distance.label("distance"))
-        .where(
-            MemoryChunk.clone_id == profile.id,
-            MemoryChunk.embedding.is_not(None),
-        )
-        .order_by(distance)
-        .limit(limit)
+async def _detail_response(backup: MemoryBackup) -> BackupDetailResponse:
+    raw = await object_storage.get_object(backup.storage_key)
+    return BackupDetailResponse(
+        id=backup.id,
+        clone_id=backup.clone_id,
+        period_start=backup.period_start,
+        period_end=backup.period_end,
+        entry_count=backup.entry_count,
+        created_at=backup.created_at,
+        restored_at=backup.restored_at,
+        payload=backup_codec.decode_payload(raw),
     )
 
-    return [
-        MemorySearchResult(
-            id=memory.id,
-            clone_id=memory.clone_id,
-            content=memory.content,
-            timestamp=memory.timestamp,
-            similarity=1.0 - float(dist),
-        )
-        for memory, dist in result.all()
-    ]
+
+@router.get("/backups/{backup_id}", response_model=BackupDetailResponse)
+async def read_own_backup(backup: OwnBackup) -> BackupDetailResponse:
+    return await _detail_response(backup)
 
 
-@router.get("/{memory_id}", response_model=MemoryResponse)
-async def read_memory(
-    memory_id: int,
-    user: CurrentUser,
+@router.post("/backups/{backup_id}/restore", response_model=BackupDetailResponse)
+async def restore_own_backup(
+    backup: OwnBackup, db: DatabaseSession
+) -> BackupDetailResponse:
+    backup.restored_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(backup)
+    return await _detail_response(backup)
+
+
+@router.post(
+    "/resurrect",
+    response_model=BackupDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def resurrect_from(
+    payload: ResurrectRequest,
+    profile: OwnProfile,
     db: DatabaseSession,
-) -> MemoryChunk:
-    memory = await db.get(MemoryChunk, memory_id)
-    if memory is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+) -> BackupDetailResponse:
+    if payload.source_profile_id == profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot resurrect from your own profile",
+        )
 
-    if user.role is not UserRole.ADMIN:
-        profile = user.profile
-        if profile is None or memory.clone_id != profile.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not own this memory",
-            )
+    source = await db.get(CloneProfile, payload.source_profile_id)
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source clone not found",
+        )
 
-    return memory
+    if source.status == ACTIVE_STATUS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot resurrect from a clone that is still active",
+        )
+
+    latest = await db.scalar(
+        select(MemoryBackup)
+        .where(MemoryBackup.clone_id == source.id)
+        .order_by(MemoryBackup.period_end.desc())
+        .limit(1)
+    )
+    if latest is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source clone has no backup to resurrect from",
+        )
+
+    raw = await object_storage.get_object(latest.storage_key)
+    new_key = object_storage.backup_key(
+        profile.id, latest.period_start, latest.period_end
+    )
+    await object_storage.put_object(new_key, raw)
+
+    resurrected = MemoryBackup(
+        clone_id=profile.id,
+        period_start=latest.period_start,
+        period_end=latest.period_end,
+        entry_count=latest.entry_count,
+        storage_key=new_key,
+        subscription_tier=profile.subscription_tier,
+        restored_at=datetime.now(UTC),
+    )
+    db.add(resurrected)
+    await db.commit()
+    await db.refresh(resurrected)
+    return await _detail_response(resurrected)

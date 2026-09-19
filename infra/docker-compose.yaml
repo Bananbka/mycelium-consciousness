@@ -4,7 +4,6 @@ services:
     restart: always
     depends_on:
       - api
-      - grpc-ingester
     ports:
       - "80:80"
     volumes:
@@ -46,23 +45,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    expose:
-      - "8000"
-
-  grpc-ingester:
-    build:
-      context: ..
-      dockerfile: services/grpc_ingester/src/grpc_ingester/Dockerfile.grpc
-    restart: always
-    env_file:
-      - .env
-    depends_on:
-      redis:
-        condition: service_healthy
-    expose:
-      - "50051"
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-18000}:8000"
 
   celery-worker:
     build:
@@ -76,11 +64,40 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
 
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: services/celery/src/Dockerfile.celery
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - uv
+      - run
+      - --package
+      - celery-worker
+      - --frozen
+      - --no-sync
+      - celery
+      - -A
+      - celery_worker.app
+      - beat
+      - --loglevel=INFO
+
   db:
-    image: pgvector/pgvector:pg16
+    image: postgres:16-alpine
     container_name: clone_postgres
     restart: always
     env_file:
@@ -105,6 +122,7 @@ services:
     image: redis:7-alpine
     container_name: clone_redis
     restart: always
+    command: redis-server --appendonly yes --appendfsync everysec
     env_file:
       - .env
     healthcheck:
@@ -114,6 +132,31 @@ services:
       retries: 10
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:latest
+    container_name: clone_minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:${MINIO_CONSOLE_HOST_PORT:-19001}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${MINIO_HOST_PORT:-19000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-19001}:9001"
+    volumes:
+      - minio_data:/data
 
 volumes:
   postgres_data:
+  redis_data:
+  minio_data:

@@ -11,6 +11,7 @@ import threading
 from celery import Celery
 from celery.signals import worker_process_init, worker_process_shutdown
 
+from shared import object_storage
 from shared.db import dispose_engine
 
 BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
@@ -30,6 +31,19 @@ app.conf.result_serializer = "msgpack"
 app.conf.worker_prefetch_multiplier = 1
 app.conf.task_acks_late = True
 app.conf.broker_connection_retry_on_startup = True
+
+ROLLUP_CHECK_INTERVAL_SECONDS = int(os.getenv("ROLLUP_CHECK_INTERVAL_SECONDS", "3600"))
+STREAM_FLUSH_INTERVAL_SECONDS = int(os.getenv("STREAM_FLUSH_INTERVAL_SECONDS", "60"))
+app.conf.beat_schedule = {
+    "flush-due-streams": {
+        "task": "memory.flush_due_streams",
+        "schedule": STREAM_FLUSH_INTERVAL_SECONDS,
+    },
+    "check-due-memory-rollups": {
+        "task": "memory.rollup_due_clones",
+        "schedule": ROLLUP_CHECK_INTERVAL_SECONDS,
+    },
+}
 
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
@@ -58,6 +72,7 @@ def run_async(coro):
 @worker_process_init.connect
 def _reset_db_pool(**_kwargs) -> None:
     run_async(dispose_engine())
+    run_async(object_storage.ensure_bucket())
 
 
 @worker_process_shutdown.connect

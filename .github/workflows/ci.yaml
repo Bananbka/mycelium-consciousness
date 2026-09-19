@@ -16,10 +16,7 @@ jobs:
           enable-cache: true
 
       - name: Install workspace
-        run: uv sync --all-packages --dev --group codegen --group test --frozen
-
-      - name: Generate protobuf stubs
-        run: uv run --with grpcio-tools python -m shared.protos.generate
+        run: uv sync --all-packages --dev --group test --frozen
 
       - name: Lint
         run: uv run ruff check .
@@ -47,12 +44,12 @@ jobs:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: secretpassword
           POSTGRES_DB: clone_memory_db
+          CELERY_BROKER_URL: redis://localhost:6379/0
           JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
-          GEMINI_API_KEY: ""
 
     services:
       db:
-        image: pgvector/pgvector:pg16
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: secretpassword
@@ -63,4 +60,13 @@ jobs:
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
           --health-retries 10

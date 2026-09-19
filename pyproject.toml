@@ -12,8 +12,8 @@ dev = [
     "pre-commit>=4.5.1",
     "ruff>=0.14.8",
 ]
-# Tests span api, celery_worker, grpc_ingester and shared, so they belong to
-# the workspace rather than to any single member package.
+# Tests span api, celery_worker and shared, so they belong to the workspace
+# rather than to any single member package.
 test = [
     "httpx>=0.28.0",
     "pytest>=8.3.0",
@@ -32,13 +32,12 @@ asyncio_default_test_loop_scope = "session"
 [tool.ruff]
 line-length = 88
 target-version = "py311"
-extend-exclude = ["*_pb2.py", "*_pb2_grpc.py", "*_pb2.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["api", "celery_worker", "grpc_ingester", "shared"]
+known-first-party = ["api", "celery_worker", "shared"]
 
 [tool.ruff.lint.per-file-ignores]
 "shared/migrations/versions/*" = ["E501"]

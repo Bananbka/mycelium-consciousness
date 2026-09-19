@@ -2,23 +2,35 @@
 
 Shared database and schema code used by the services.
 
-It contains the SQLAlchemy async engine/session factory, ORM models, pgvector
-fields, protobuf contracts, and the Alembic migration environment.
+It contains the SQLAlchemy async engine/session factory, ORM models, the JWT
+primitives, the Redis stream helpers, the object storage client, and the
+Alembic migration environment.
 
 The importable package lives under `src/shared/` (src layout, built with
 `uv_build`). Nothing outside `src/` is importable as `shared.*`.
 
-## Protobuf stubs
+## Streams
 
-`src/shared/protos/memory_stream.proto` is the contract. The generated
-`*_pb2*.py` modules are gitignored — regenerate them with:
+`shared.streams` is the hot write path: `append_memory` is one `XADD` and
+returns the stream's new length so the caller can decide whether to trigger
+an out-of-band flush. `read_all`/`trim_up_to` back the flush that moves a
+stream's entries into `MemoryBuffer` rows; `active_clone_ids` lists every
+clone with a non-empty stream, for the scheduled flush. `MEMORY_STREAM_MAXLEN`
+is the per-stream safety valve a write checks against — not a passive Redis
+`MAXLEN` trim (which would silently discard the oldest entries), but a
+threshold that triggers an immediate flush instead.
 
-```bash
-uv run python -m shared.protos.generate
-```
+## Object storage
 
-`--proto_path` is the `src` root so generated imports resolve as
-`shared.protos.memory_stream_pb2` rather than a bare top-level module.
+`shared.object_storage` wraps a synchronous `boto3` S3 client in
+`asyncio.to_thread` (`put_object`, `get_object`, `delete_object`,
+`list_keys`), pointed at MinIO by default (`MINIO_ENDPOINT`) but usable
+against any S3-compatible service. It only ever holds backup archives — a
+clone's live, not-yet-backed-up memory is a `MemoryBuffer` row in Postgres,
+reached via the Redis stream above, not written there directly.
+
+`shared.backup_codec` packs a backup's entries with msgpack and gzips the
+result only when that's smaller than the raw packed bytes.
 
 ## Connection pooling
 

@@ -1,6 +1,5 @@
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -8,16 +7,16 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
-    Text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
+from shared import backup_codec
 from shared.db.db import Base
 from shared.roles import UserRole
-
-EMBEDDING_DIM = 768
+from shared.subscriptions import SubscriptionTier
 
 
 class User(Base):
@@ -54,6 +53,9 @@ class User(Base):
     )
 
 
+ACTIVE_STATUS = "active"
+
+
 class CloneProfile(Base):
     __tablename__ = "clone_profiles"
 
@@ -61,8 +63,17 @@ class CloneProfile(Base):
     designation: Mapped[str] = mapped_column(String, unique=True, index=True)
     status: Mapped[str] = mapped_column(
         String,
-        default="active",
-        server_default="active",
+        default=ACTIVE_STATUS,
+        server_default=ACTIVE_STATUS,
+    )
+    subscription_tier: Mapped[SubscriptionTier] = mapped_column(
+        Enum(
+            SubscriptionTier,
+            name="subscription_tier",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        default=SubscriptionTier.FREE,
+        server_default=SubscriptionTier.FREE.value,
     )
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -75,39 +86,87 @@ class CloneProfile(Base):
     )
 
     user: Mapped["User | None"] = relationship(back_populates="profile")
-    memories: Mapped[list["MemoryChunk"]] = relationship(
+    buffer: Mapped["MemoryBuffer | None"] = relationship(
+        back_populates="clone",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    backups: Mapped[list["MemoryBackup"]] = relationship(
         back_populates="clone",
         cascade="all, delete-orphan",
-        # The FK already declares ON DELETE CASCADE; without this SQLAlchemy
-        # would SELECT every chunk into Python and emit one DELETE per row.
         passive_deletes=True,
     )
 
 
-class MemoryChunk(Base):
-    __tablename__ = "memory_chunks"
+class MemoryBuffer(Base):
+    """One clone's not-yet-backed-up memory: a single updated bytea row.
+
+    `celery_worker.flush` drains Redis into this row (decode, append, encode,
+    overwrite) rather than inserting a row per write. `celery_worker.pipeline`
+    reads it whole, archives it to object storage, and deletes the row — the
+    next flush recreates it from scratch. There is no Redis stage skipped: a
+    write still lands in Redis first; this is where it ends up once flushed.
+    """
+
+    __tablename__ = "memory_buffers"
+
+    clone_id: Mapped[int] = mapped_column(
+        ForeignKey("clone_profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    payload_blob: Mapped[bytes] = mapped_column("payload", LargeBinary)
+    entry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    clone: Mapped[CloneProfile] = relationship(back_populates="buffer")
+
+    @property
+    def payload(self) -> list[dict]:
+        return (
+            backup_codec.decode_payload(self.payload_blob) if self.entry_count else []
+        )
+
+
+class MemoryBackup(Base):
+    """Metadata for one archived period. The payload itself lives in MinIO.
+
+    `storage_key` points at the object; nothing here holds the bytes, so
+    listing and pruning backups never touches object storage except to
+    delete the object a pruned row pointed at.
+    """
+
+    __tablename__ = "memory_backups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     clone_id: Mapped[int] = mapped_column(
         ForeignKey("clone_profiles.id", ondelete="CASCADE"),
     )
-    content: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
-    timestamp: Mapped[datetime] = mapped_column(
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entry_count: Mapped[int] = mapped_column(Integer)
+    storage_key: Mapped[str] = mapped_column(String)
+    subscription_tier: Mapped[SubscriptionTier] = mapped_column(
+        Enum(
+            SubscriptionTier,
+            name="subscription_tier",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    clone: Mapped[CloneProfile] = relationship(back_populates="memories")
+    clone: Mapped[CloneProfile] = relationship(back_populates="backups")
 
     __table_args__ = (
-        Index(
-            "ix_memory_chunks_embedding_hnsw",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
-            postgresql_ops={"embedding": "vector_cosine_ops"},
-        ),
-        Index("ix_memory_chunks_clone_id_timestamp", "clone_id", "timestamp"),
+        Index("ix_memory_backups_clone_id_period_end", "clone_id", "period_end"),
     )

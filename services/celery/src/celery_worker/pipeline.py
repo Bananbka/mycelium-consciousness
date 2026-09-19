@@ -1,88 +1,144 @@
-"""Business logic for memory ingestion.
-
-Kept free of Celery imports so it can be exercised directly in tests against a
-transaction that gets rolled back.
-"""
-
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.db import CloneProfile, MemoryChunk
-from shared.embeddings import get_embedder
+from shared import object_storage
+from shared.db import CloneProfile, MemoryBackup, MemoryBuffer
+from shared.subscriptions import BACKUP_POLICIES
 
 logger = logging.getLogger(__name__)
 
 
-def _captured_at(unix_ms: int | None) -> datetime | None:
-    """Convert an implant capture time to a datetime, ignoring unset values."""
-    if not unix_ms or unix_ms <= 0:
-        return None
-    try:
-        return datetime.fromtimestamp(unix_ms / 1000, tz=UTC)
-    except (OverflowError, OSError, ValueError):
-        logger.warning("ignoring out-of-range captured_at_unix_ms=%r", unix_ms)
-        return None
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-async def store_batch(
-    session: AsyncSession,
-    owner_user_id: int,
-    payloads: list[bytes],
-    captured_at_unix_ms: list[int] | None = None,
-) -> dict[str, str | int]:
-    """Resolve the clone, embed each frame, and persist the chunks."""
-    profile = await session.scalar(
-        select(CloneProfile).where(CloneProfile.user_id == owner_user_id)
+def _cutoff_by_tier(now: datetime):
+    return case(
+        *[
+            (CloneProfile.subscription_tier == tier, now - policy.interval)
+            for tier, policy in BACKUP_POLICIES.items()
+        ]
     )
 
-    if profile is None:
-        logger.warning(
-            "rejecting batch: no clone profile linked to user_id=%r", owner_user_id
+
+async def find_due_clones(session: AsyncSession, now: datetime) -> list[CloneProfile]:
+    last_backup = (
+        select(
+            MemoryBackup.clone_id,
+            func.max(MemoryBackup.period_end).label("last_end"),
         )
-        return {
-            "owner_user_id": owner_user_id,
-            "stored": 0,
-            "status": "no_clone_profile",
-        }
+        .group_by(MemoryBackup.clone_id)
+        .subquery()
+    )
+    anchor = func.coalesce(last_backup.c.last_end, CloneProfile.created_at)
 
-    timestamps = captured_at_unix_ms or []
-    embedder = get_embedder()
-    stored = 0
+    result = await session.execute(
+        select(CloneProfile)
+        .outerjoin(last_backup, last_backup.c.clone_id == CloneProfile.id)
+        .where(anchor <= _cutoff_by_tier(now))
+    )
+    return list(result.scalars().all())
 
-    for index, payload in enumerate(payloads):
-        try:
-            content = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            logger.warning(
-                "dropping frame %d for user_id=%r: not valid UTF-8 (%d bytes)",
-                index,
-                owner_user_id,
-                len(payload),
-            )
-            continue
 
-        text = content.strip()
-        if not text:
-            continue
+_RETAIN_COUNT_BY_TIER = case(
+    *[
+        (MemoryBackup.subscription_tier == tier, policy.retain_count)
+        for tier, policy in BACKUP_POLICIES.items()
+    ]
+)
 
-        chunk = MemoryChunk(
-            clone_id=profile.id,
-            content=text,
-            embedding=await embedder.embed(text),
+
+async def _prune_stale_backups(session: AsyncSession, clone: CloneProfile) -> int:
+    ranked = (
+        select(
+            MemoryBackup.id,
+            MemoryBackup.storage_key,
+            func.row_number()
+            .over(order_by=MemoryBackup.period_end.desc())
+            .label("rank"),
+            _RETAIN_COUNT_BY_TIER.label("retain_count"),
         )
-        # Record when the implant captured the memory, not when the worker
-        # happened to insert it; falls back to the column's server default.
-        captured = _captured_at(timestamps[index] if index < len(timestamps) else None)
-        if captured is not None:
-            chunk.timestamp = captured
+        .where(MemoryBackup.clone_id == clone.id)
+        .subquery()
+    )
 
-        session.add(chunk)
-        stored += 1
+    result = await session.execute(
+        select(ranked.c.id, ranked.c.storage_key).where(
+            ranked.c.rank > ranked.c.retain_count
+        )
+    )
+    stale = result.all()
+    if not stale:
+        return 0
 
+    for _, storage_key in stale:
+        await object_storage.delete_object(storage_key)
+
+    await session.execute(
+        delete(MemoryBackup)
+        .where(MemoryBackup.id.in_([backup_id for backup_id, _ in stale]))
+        .execution_options(synchronize_session=False)
+    )
+    return len(stale)
+
+
+async def rollup_clone(
+    session: AsyncSession, clone: CloneProfile, now: datetime
+) -> dict[str, str | int]:
+    buffer = await session.get(MemoryBuffer, clone.id)
+    if buffer is None or buffer.entry_count == 0:
+        return {"clone_id": clone.id, "status": "empty", "entry_count": 0}
+
+    payload = buffer.payload
+    period_start = min(
+        _aware(datetime.fromisoformat(item["captured_at"])) for item in payload
+    )
+
+    storage_key = object_storage.backup_key(clone.id, period_start, now)
+    await object_storage.put_object(storage_key, buffer.payload_blob)
+
+    backup = MemoryBackup(
+        clone_id=clone.id,
+        period_start=period_start,
+        period_end=now,
+        entry_count=buffer.entry_count,
+        storage_key=storage_key,
+        subscription_tier=clone.subscription_tier,
+    )
+    session.add(backup)
+    await session.delete(buffer)
     await session.commit()
-    return {"owner_user_id": owner_user_id, "stored": stored, "status": "stored"}
+
+    pruned = await _prune_stale_backups(session, clone)
+    await session.commit()
+
+    logger.info(
+        "rolled up clone_id=%d entries=%d pruned=%d",
+        clone.id,
+        backup.entry_count,
+        pruned,
+    )
+    return {
+        "clone_id": clone.id,
+        "status": "backed_up",
+        "entry_count": backup.entry_count,
+    }
+
+
+async def run_rollup(session: AsyncSession) -> list[dict[str, str | int]]:
+    now = datetime.now(UTC)
+    due = await find_due_clones(session, now)
+
+    results = []
+    for clone in due:
+        try:
+            results.append(await rollup_clone(session, clone, now))
+        except Exception:
+            logger.exception("rollup failed for clone_id=%d, skipping", clone.id)
+            await session.rollback()
+    return results

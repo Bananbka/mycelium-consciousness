@@ -4,7 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from shared.db.models import UserRole
+from shared.roles import UserRole
+from shared.subscriptions import SubscriptionTier
 
 
 class RegisterRequest(BaseModel):
@@ -39,6 +40,7 @@ class ProfileResponse(BaseModel):
     id: int
     designation: str
     status: str
+    subscription_tier: SubscriptionTier
     user_id: int | None
     created_at: datetime
 
@@ -48,31 +50,58 @@ class ProfileUpdateRequest(BaseModel):
     status: str | None = Field(default=None, min_length=1, max_length=32)
 
 
-class MemoryCreateRequest(BaseModel):
+class SubscriptionUpdateRequest(BaseModel):
+    subscription_tier: SubscriptionTier
+
+
+class MemoryWriteRequest(BaseModel):
     content: str = Field(min_length=1, max_length=8192)
+    captured_at: datetime | None = None
 
     @field_validator("content")
     @classmethod
     def _reject_blank(cls, value: str) -> str:
-        """Whitespace-only content embeds to a zero vector, whose cosine
-        distance is NaN and serialises as invalid JSON."""
         stripped = value.strip()
         if not stripped:
             raise ValueError("content must not be blank")
         return stripped
 
+    @field_validator("captured_at")
+    @classmethod
+    def _require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("captured_at must include a UTC offset")
+        return value
 
-class MemoryResponse(BaseModel):
+
+class MemoryWriteResponse(BaseModel):
+    status: str = "recorded"
+
+
+class BackupResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     clone_id: int
-    content: str
-    timestamp: datetime
+    period_start: datetime
+    period_end: datetime
+    entry_count: int
+    created_at: datetime
+    restored_at: datetime | None
 
 
-class MemorySearchResult(MemoryResponse):
-    similarity: float
+class BackupDetailResponse(BackupResponse):
+    payload: list[dict]
+
+
+class ResurrectRequest(BaseModel):
+    source_profile_id: int
+
+
+class RollupTriggerResponse(BaseModel):
+    clone_id: int
+    status: str
+    entry_count: int
 
 
 class HomeResponse(BaseModel):

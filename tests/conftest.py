@@ -9,11 +9,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 # At least 32 bytes, or PyJWT warns the HMAC key is too short for SHA256.
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-pytest-only-0123456789")
-# Force the offline HashingEmbedder so tests never reach the network.
-os.environ["GEMINI_API_KEY"] = ""
 
 from api.main import app  # noqa: E402
 from api.security import hash_password  # noqa: E402
+from shared import object_storage, streams  # noqa: E402
 from shared.db.db import get_db  # noqa: E402
 from shared.db.models import Base, CloneProfile, User, UserRole  # noqa: E402
 
@@ -78,7 +77,6 @@ async def engine():
 
     engine = create_async_engine(url, poolclass=None)
     async with engine.begin() as conn:
-        await conn.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS vector")
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
@@ -114,6 +112,47 @@ async def session(engine):
         await transaction.rollback()
 
 
+def _guard_destructive_bucket() -> None:
+    bucket = object_storage.MINIO_BUCKET
+    if "test" in bucket.lower():
+        return
+    if os.getenv("ALLOW_DESTRUCTIVE_TEST_BUCKET") == "1":
+        return
+    pytest.exit(
+        f"Refusing to run: the test suite wipes the whole MinIO bucket, and "
+        f"{bucket!r} is not a test bucket. Set MINIO_BUCKET to something "
+        "containing 'test', or set ALLOW_DESTRUCTIVE_TEST_BUCKET=1 to override.",
+        returncode=4,
+    )
+
+
+@pytest.fixture(autouse=True)
+async def clean_object_storage():
+    _guard_destructive_bucket()
+    await object_storage.ensure_bucket()
+
+    async def _clear() -> None:
+        for key in await object_storage.list_keys():
+            await object_storage.delete_object(key)
+
+    await _clear()
+    yield
+    await _clear()
+
+
+@pytest.fixture(autouse=True)
+async def clean_redis_streams():
+    client = streams.get_redis()
+
+    async def _clear() -> None:
+        async for key in client.scan_iter(match=f"{streams.STREAM_KEY_PREFIX}*"):
+            await client.delete(key)
+
+    await _clear()
+    yield
+    await _clear()
+
+
 @pytest.fixture
 async def client(session):
     async def override_get_db():
@@ -145,7 +184,6 @@ async def _make_user(
 
     session.add(user)
     await session.flush()
-    await session.refresh(user)
     return user
 
 

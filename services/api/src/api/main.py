@@ -7,12 +7,14 @@ from sqlalchemy import text
 from api.config import validate_jwt_secret
 from api.deps import DatabaseSession
 from api.routers import admin, auth, home, memories, profiles
+from shared import object_storage
 from shared.db.db import dispose_engine
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     validate_jwt_secret()
+    await object_storage.ensure_bucket()
     yield
     await dispose_engine()
 

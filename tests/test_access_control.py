@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
+import jwt
 import pytest
+
+from api.config import JWT_ALGORITHM, JWT_SECRET_KEY
 
 PROTECTED_ROUTES = [
     ("GET", "/auth/me"),
@@ -11,9 +16,11 @@ PROTECTED_ROUTES = [
     ("GET", "/profiles/me"),
     ("PATCH", "/profiles/me"),
     ("GET", "/profiles"),
-    ("GET", "/memories"),
-    ("POST", "/memories"),
-    ("GET", "/memories/search?q=test"),
+    ("POST", "/memories/write"),
+    ("GET", "/memories/stream/status"),
+    ("GET", "/memories/backups"),
+    ("GET", "/memories/backups/1"),
+    ("POST", "/memories/backups/1/restore"),
     ("GET", "/admin/users"),
     ("GET", "/admin/clones"),
     ("GET", "/admin/stats"),
@@ -51,7 +58,7 @@ ADMIN_ONLY_ROUTES = [
     ("GET", "/admin/users"),
     ("GET", "/admin/clones"),
     ("GET", "/admin/stats"),
-    ("GET", "/admin/clones/1/memories"),
+    ("GET", "/admin/clones/1/backups"),
 ]
 
 
@@ -83,3 +90,26 @@ async def test_admin_cannot_reach_the_clone_console(client, admin_headers):
 async def test_admin_has_no_clone_profile(client, admin_headers):
     response = await client.get("/profiles/me", headers=admin_headers)
     assert response.status_code == 403
+
+
+async def test_admin_cannot_write_to_the_memory_stream(client, admin_headers):
+    response = await client.post(
+        "/memories/write", headers=admin_headers, json={"content": "not a clone"}
+    )
+    assert response.status_code == 403
+
+
+def _token_missing_subject() -> str:
+    claims = {
+        "role": "clone",
+        "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
+    }
+    return jwt.encode(claims, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+async def test_token_without_a_subject_is_rejected(client):
+    response = await client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {_token_missing_subject()}"},
+    )
+    assert response.status_code == 401

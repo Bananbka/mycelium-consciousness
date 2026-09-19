@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from api.security import decode_access_token
 from shared.db.db import get_db
-from shared.db.models import CloneProfile, User, UserRole
+from shared.db.models import CloneProfile, MemoryBackup, User, UserRole
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
@@ -77,19 +77,31 @@ CurrentAdmin = Annotated[User, Depends(require_role(UserRole.ADMIN))]
 CurrentClone = Annotated[User, Depends(require_role(UserRole.CLONE))]
 
 
-async def get_own_profile(db: DatabaseSession, user: CurrentClone) -> CloneProfile:
-    result = await db.execute(
-        select(CloneProfile).where(CloneProfile.user_id == user.id)
-    )
-    profile = result.scalar_one_or_none()
-
-    if profile is None:
+async def get_own_profile(user: CurrentClone) -> CloneProfile:
+    if user.profile is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No clone profile linked to this account",
         )
 
-    return profile
+    return user.profile
 
 
 OwnProfile = Annotated[CloneProfile, Depends(get_own_profile)]
+
+
+async def get_own_backup(
+    backup_id: int,
+    profile: OwnProfile,
+    db: DatabaseSession,
+) -> MemoryBackup:
+    backup = await db.get(MemoryBackup, backup_id)
+    if backup is None or backup.clone_id != profile.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
+    return backup
+
+
+OwnBackup = Annotated[MemoryBackup, Depends(get_own_backup)]

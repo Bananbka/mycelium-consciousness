@@ -11,7 +11,7 @@ router = APIRouter(tags=["home"])
 @router.get("/me/home", response_model=HomeResponse)
 async def clone_home(user: CurrentClone) -> HomeResponse:
     return HomeResponse(
-        message="Clone console. Your memories are syncing.",
+        message="Clone console. Your memory stream is recording.",
         role=user.role,
         email=user.email,
     )
