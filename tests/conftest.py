@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import pytest
+import redis.asyncio as redis
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -12,7 +13,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-pytest-only-0123456
 
 from api.main import app  # noqa: E402
 from api.security import hash_password  # noqa: E402
-from shared import object_storage, streams  # noqa: E402
+from shared import cache, object_storage, streams  # noqa: E402
 from shared.db.db import get_db  # noqa: E402
 from shared.db.models import Base, CloneProfile, User, UserRole  # noqa: E402
 
@@ -147,6 +148,12 @@ async def clean_redis_streams():
     async def _clear() -> None:
         async for key in client.scan_iter(match=f"{streams.STREAM_KEY_PREFIX}*"):
             await client.delete(key)
+        cache_client = redis.from_url(cache.CACHE_REDIS_URL, decode_responses=True)
+        try:
+            async for key in cache_client.scan_iter(match="cache:*"):
+                await cache_client.delete(key)
+        finally:
+            await cache_client.aclose()
 
     await _clear()
     yield

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 
@@ -15,7 +15,7 @@ from api.schemas import (
     ResurrectRequest,
 )
 from api.tasks import flush_clone_stream
-from shared import backup_codec, object_storage, streams
+from shared import backup_codec, cache, object_storage, streams
 from shared.db.models import ACTIVE_STATUS, CloneProfile, MemoryBackup
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -48,15 +48,38 @@ async def stream_status(profile: OwnProfile) -> dict[str, int]:
 async def list_own_backups(
     profile: OwnProfile,
     db: DatabaseSession,
+    response: Response,
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[MemoryBackup]:
+    cache_control: str | None = Header(default=None),
+) -> list[dict]:
+    """Cache-aside: Redis first, Postgres on a miss.
+
+    `X-Cache` says where the answer came from: HIT, MISS, or BYPASS (cache
+    unreachable, or the client sent `Cache-Control: no-cache`).
+    """
+    key = cache.make_key("backups", profile.id, limit=limit)
+    if cache_control and "no-cache" in cache_control.lower():
+        state, cached = "BYPASS", None
+    else:
+        state, cached = await cache.lookup(key)
+    if state == "HIT":
+        response.headers["X-Cache"] = "HIT"
+        return cached
+
     result = await db.execute(
         select(MemoryBackup)
         .where(MemoryBackup.clone_id == profile.id)
         .order_by(MemoryBackup.period_end.desc())
         .limit(limit)
     )
-    return list(result.scalars().all())
+    data = [
+        BackupResponse.model_validate(row).model_dump(mode="json")
+        for row in result.scalars().all()
+    ]
+    if state == "MISS":
+        await cache.store(key, data, cache.BACKUPS_TTL_SECONDS)
+    response.headers["X-Cache"] = state
+    return data
 
 
 async def _detail_response(backup: MemoryBackup) -> BackupDetailResponse:
@@ -84,6 +107,7 @@ async def restore_own_backup(
 ) -> BackupDetailResponse:
     backup.restored_at = datetime.now(UTC)
     await db.commit()
+    await cache.invalidate_backups(backup.clone_id)
     await db.refresh(backup)
     return await _detail_response(backup)
 
@@ -146,5 +170,6 @@ async def resurrect_from(
     )
     db.add(resurrected)
     await db.commit()
+    await cache.invalidate_backups(profile.id)
     await db.refresh(resurrected)
     return await _detail_response(resurrected)

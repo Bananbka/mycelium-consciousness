@@ -398,3 +398,109 @@ and clients still see 100% errors. Remedies: two nginx nodes sharing a virtual
 IP via Keepalived/VRRP (active/passive failover in seconds), or DNS round robin
 across several balancers (cheap, but DNS caching delays failure detection), or
 a cloud L4 load balancer in front of a pair of nginx nodes.
+
+## Lab 4 — Distributed caching (Cache-Aside)
+
+### What is cached and why
+
+This system is write-only by design, so there is exactly one read-heavy
+scenario worth caching: **`GET /memories/backups`**, a clone's own backup
+history (metadata only — never memory payloads). It is the endpoint a
+dashboard or restore UI polls, it is a `ORDER BY period_end DESC LIMIT n`
+scan over `memory_backups`, and it changes only on rollup (at most daily on the
+premium tier), restore, or resurrect — so reads outnumber writes by orders of
+magnitude. Deliberately **not** cached: `/profiles/me` and the auth lookup (a
+deactivation must take effect immediately, so those stay on Postgres), backup
+payloads (large, fetched once), and anything on the write path.
+
+Acceptable staleness: a missed invalidation may show an out-of-date list for at
+most the TTL (60 s); the listing carries no security-relevant data.
+
+### Cache-Aside flow
+
+```mermaid
+flowchart LR
+    client([Client]) --> nginx[nginx]
+    nginx --> api1[api #1]
+    nginx --> api2[api #2]
+    api1 -->|1. GET key| cache[(Redis cache, db 1)]
+    api2 -->|1. GET key| cache
+    api1 -->|2. on MISS: SELECT| pg[(PostgreSQL)]
+    api2 -->|2. on MISS: SELECT| pg
+    api1 -.->|3. SET key + TTL| cache
+    worker[celery-worker rollup] -->|invalidate after commit| cache
+    api1 -->|invalidate on restore / resurrect| cache
+```
+
+`HIT` returns straight from Redis; `MISS` reads Postgres, stores the JSON with
+a TTL and returns it; `BYPASS` means the cache was unreachable (or the client
+sent `Cache-Control: no-cache`) and the answer came from Postgres. Every
+response carries `X-Cache: HIT | MISS | BYPASS`.
+
+### Key scheme and TTL
+
+`cache:<version>:<domain>:<entity-id>:<params-hash>`, e.g.
+`cache:v1:backups:42:9f2c1a7e` (`params-hash` = first 8 hex of SHA-1 over the
+sorted query params, here `limit`). The clone id is part of the key, so one
+clone can never read another's entry, and the id-before-hash order lets one
+prefix scan drop every variant of one clone. The version segment (`v1`) lets a
+response-shape change invalidate everything by bumping it.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| TTL | 60 s (`CACHE_BACKUPS_TTL_SECONDS`), ±10% jitter | Safety net for missed invalidation; jitter stops keys created together expiring together (avalanche). |
+| Storage | Redis **db 1** on the same container | Separate keyspace from the write-path streams and Celery broker on db 0. |
+| Eviction | not set | Cache keys are small and TTL-bounded; a real deployment would set `maxmemory` + `allkeys-lru` on a dedicated cache instance. |
+
+### Invalidation
+
+Every mutation of a clone's backup list drops that clone's keys **after** the
+Postgres commit: the rollup (`celery_worker.pipeline.rollup_clone`, which
+also covers admin force-rollup and pruning), `POST /memories/backups/{id}/restore`,
+and `POST /memories/resurrect`. The next read is a `MISS` with fresh data.
+Remaining race: a reader that queried Postgres just before the commit can
+re-populate the old list just after the invalidation; the TTL bounds that.
+
+### Fallback (graceful degradation)
+
+Cache calls are fail-open with a 0.5 s socket timeout: any Redis error is
+logged and treated as `BYPASS`, and the request is served from Postgres. The
+write path does need Redis (it is the stream buffer), but reads keep working.
+Try it: `bash scripts/cache_experiment.sh demo`.
+
+### Results (`scripts/cache_experiment.sh demo|bench`)
+
+Demo, one clone with 200 seeded backups: `MISS` → `HIT` → restore →
+`MISS` (fresh) → `HIT` → `docker stop redis` → `BYPASS` with HTTP 200 → Redis
+restarted → `HIT`.
+
+Single-request latency, curl through nginx: MISS ≈ 17–23 ms, HIT ≈ 13–15 ms.
+
+Load (`limit=200`, 30 workers, 20 s, 2 api replicas, same laptop as the
+generator):
+
+| Mode | RPS | p50 ms | p95 ms | p99 ms | Postgres rows read |
+| --- | --- | --- | --- | --- | --- |
+| cold (`Cache-Control: no-cache`, every request hits Postgres) | 97 | 166 | 1018 | 1530 | 782,691 |
+| warm (cache enabled) | 121 | 138 | 758 | 1233 | 53,641 |
+
+The main effect is on the database: **~93% fewer rows read** for the same
+traffic. The latency gain is modest (+24% RPS, p50 −17%) because every request
+still does the authentication lookup in Postgres (deliberately uncached) and
+the client, nginx, api and Postgres all share one host's CPU. On a real
+deployment the freed database capacity is the benefit, not the millisecond.
+Right after Redis restarts, the first request can still be a `BYPASS` while
+the client reconnects.
+
+### Theory notes
+
+- **Expiration vs invalidation:** expiration (TTL) is time-driven and
+  best-effort; invalidation is event-driven and exact. We use both: explicit
+  invalidation on every mutation, TTL as the backstop.
+- **Cache stampede / thundering herd:** when a hot key expires or is
+  invalidated, many concurrent readers all miss and hit Postgres at once. Not
+  mitigated here beyond the short listing query; the standard fixes are a
+  per-key lock / single-flight, or refreshing early.
+- **Cache avalanche:** many keys expiring together — mitigated by the TTL jitter.
+- **Eviction (LRU/LFU):** what Redis drops when `maxmemory` is reached; LRU
+  favours recency, LFU frequency. Unset here (see table above).

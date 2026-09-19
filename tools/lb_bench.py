@@ -29,18 +29,26 @@ async def run(args: argparse.Namespace) -> None:
         base_url=args.base_url, timeout=15, limits=limits
     ) as client:
         tag = uuid.uuid4().hex[:8]
-        creds = {
-            "email": f"bench-{tag}@example.com",
-            "password": uuid.uuid4().hex,
-        }
-        await client.post("/auth/register", json={**creds, "designation": f"b-{tag}"})
+        if args.email:
+            creds = {"email": args.email, "password": args.password}
+        else:
+            creds = {
+                "email": f"bench-{tag}@example.com",
+                "password": uuid.uuid4().hex,
+            }
+            await client.post(
+                "/auth/register", json={**creds, "designation": f"b-{tag}"}
+            )
         login = await client.post("/auth/login", json=creds)
         login.raise_for_status()
         headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        if args.no_cache:
+            headers["Cache-Control"] = "no-cache"
 
         latencies: list[float] = []
         by_instance: Counter[str] = Counter()
         codes: Counter[int | str] = Counter()
+        cache_states: Counter[str] = Counter()
 
         async def one() -> None:
             started = time.perf_counter()
@@ -57,12 +65,14 @@ async def run(args: argparse.Namespace) -> None:
             latencies.append((time.perf_counter() - started) * 1000)
             codes[r.status_code] += 1
             by_instance[r.headers.get("x-instance-id", "?")] += 1
+            cache_states[r.headers.get("x-cache", "-")] += 1
 
         for _ in range(args.warmup):
             await one()
         latencies.clear()
         by_instance.clear()
         codes.clear()
+        cache_states.clear()
 
         stop_at = time.monotonic() + args.duration
 
@@ -88,6 +98,7 @@ async def run(args: argparse.Namespace) -> None:
             f"latency ms  : avg {sum(s) / len(s):.1f}  p50 {pct(s, 0.5):.1f}  "
             f"p95 {pct(s, 0.95):.1f}  p99 {pct(s, 0.99):.1f}"
         )
+    print(f"x-cache     : {dict(cache_states)}")
     served = sum(by_instance.values()) or 1
     for inst, n in sorted(by_instance.items()):
         print(f"instance {inst:>14}: {n:6d} ({100 * n / served:.1f}%)")
@@ -100,6 +111,11 @@ def main() -> None:
     p.add_argument("--method", choices=["GET", "POST"], default="GET")
     p.add_argument("--concurrency", type=int, default=30)
     p.add_argument("--duration", type=float, default=20)
+    p.add_argument("--email", help="reuse this account instead of registering")
+    p.add_argument("--password")
+    p.add_argument(
+        "--no-cache", action="store_true", help="send Cache-Control: no-cache"
+    )
     p.add_argument("--warmup", type=int, default=50)
     asyncio.run(run(p.parse_args()))
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared import object_storage
+from shared import cache, object_storage
 from shared.db import CloneProfile, MemoryBackup, MemoryBuffer
 from shared.subscriptions import BACKUP_POLICIES
 
@@ -116,6 +116,7 @@ async def rollup_clone(
 
     pruned = await _prune_stale_backups(session, clone)
     await session.commit()
+    await cache.invalidate_backups(clone.id)
 
     logger.info(
         "rolled up clone_id=%d entries=%d pruned=%d",
