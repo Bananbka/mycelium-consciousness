@@ -238,6 +238,8 @@ uv run --package api seed-admin ops@example.com <password>
 
 ## Lab 2 — Stateless architecture
 
+![C4 component diagram: stateless API instances](docs/media/c4-component-lab2.png)
+
 ### State audit
 
 | Category | What | Where it lives |
