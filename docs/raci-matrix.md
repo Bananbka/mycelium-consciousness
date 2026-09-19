@@ -17,7 +17,7 @@ Informed (інформується про результат).
 | Rollup-конвеєр та інтеграція з MinIO (`celery_worker/pipeline.py`, `shared/object_storage.py`, `shared/backup_codec.py`) | R, A | C |
 | Адміністрування, тарифи, force-rollup, resurrect (`api/routers/admin.py`, `api/routers/memories.py`) | R, A | I |
 | Контейнеризація (Dockerfile'и сервісів, `docker-compose.yaml`, мережі й volumes) | C | R, A |
-| Reverse proxy та балансування навантаження (`infra/nginx.conf`) | I | R, A |
+| Reverse proxy та балансування навантаження (`infra/nginx/default.conf.template`) | I | R, A |
 | CI/CD pipeline (`.github/workflows/ci.yaml`) | I | R, A |
 | Набір тестів (`tests/`: unit, integration, IDOR, access control) | C | R, A |
 | Інструмент навантажувального тестування (`tools/load_generator.py`) | I | R, A |

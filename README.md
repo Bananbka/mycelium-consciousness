@@ -303,3 +303,98 @@ Stateless means the *process* holds no per-client state — data still exists,
 in shared stores. Hidden affinity risks: in-process caches or counters,
 local files, node-local locks, and anything that only works because the
 same client keeps hitting the same node.
+
+## Lab 3 — Horizontal scaling and load balancing
+
+### Topology
+
+Clients reach only nginx (`:80`); `api` replicas publish no host ports, so the
+upstream pool is unreachable from outside the compose network. The pool and
+algorithm come from two env vars rendered into
+`infra/nginx/default.conf.template`:
+
+| Env var | Default |
+| --- | --- |
+| `LB_ALGORITHM` | `least_conn;` (empty string = round robin, `ip_hash;`) |
+| `LB_SERVERS` | `server api:8000 max_fails=3 fail_timeout=15s;` |
+
+Switch live: `LB_ALGORITHM="ip_hash;" docker compose -f infra/docker-compose.yaml up -d --no-deps --force-recreate nginx`.
+`api-slow` (same image, `SIMULATED_LATENCY_MS`, compose profile `slow`) is the
+degraded node for the asymmetric experiment.
+
+Health: `GET /health` checks Postgres, Redis and MinIO (2s timeout each) and
+returns **503** with per-dependency status when any fails. nginx does *passive*
+health checking (`max_fails`/`fail_timeout` plus `proxy_next_upstream`);
+open-source nginx has no active probes — that needs HAProxy/Traefik/nginx Plus.
+
+Reproduce everything: `scripts/lb_experiments.sh {distribution|asymmetric|scaleout|failover}`
+(uses `tools/lb_bench.py`). Environment: one Windows/Docker Desktop laptop,
+`API_WORKERS=2` per replica, load generator on the same host (so absolute
+numbers are only comparable to each other, not to a real deployment).
+
+### Algorithm comparison (1 fast node + 1 node with 300 ms added latency, 30 workers, 20 s)
+
+| Algorithm | RPS | p50 ms | p95 ms | p99 ms | Share to slow / fast |
+| --- | --- | --- | --- | --- | --- |
+| round robin | 169 | 324 | 340 | 409 | 50% / 50% |
+| least_conn | 139 | 129 | 590 | 885 | 23% / 77% |
+| weighted RR (fast=3, slow=1) | 142 | 117 | 579 | 848 | 25% / 75% |
+| ip_hash | 87 | 338 | 375 | 467 | 100% / 0% (single client) |
+
+Reading it honestly: `least_conn` and weighted RR do what they should —
+they steer ~75% of traffic away from the slow node and cut the median from
+324 to ~120 ms. But **round robin has the better p99 and throughput here**,
+because the "slow" node's delay is a sleep that burns no CPU, while the fast
+node (2 workers, sharing the host with the generator, Postgres and Redis)
+saturates when it takes three quarters of the load. So the tail latency of the
+weighted/least_conn runs is queueing on the fast node, not on the slow one.
+Least-connections wins when the slowness is real (CPU-bound or slow I/O on a
+node with the same capacity); here it does not. `ip_hash` gives session
+affinity — with one client it pins everything to one node, the worst case for
+distribution and exactly the affinity lab 2 removed the need for.
+Equal replicas, 200 sequential requests: RR 94/106, least_conn 94/106 —
+with no concurrency, `least_conn` degenerates to round robin.
+
+### Scale-out (least_conn, 30 workers, 20 s)
+
+| Instances | Write RPS | Write p99 ms | Read (`/profiles/me`) RPS | Read p99 ms |
+| --- | --- | --- | --- | --- |
+| 1 | 88 | 2309 | 121 | 1154 |
+| 2 | 121 | 1624 | 162 | 823 |
+| 3 | 120 | 1605 | 169 | 809 |
+
+1→2 replicas gives +37% writes / +34% reads; 2→3 gives essentially nothing.
+**The next bottleneck is not the API layer.** Every request runs on the same
+Docker host CPU shared with Postgres, Redis, MinIO and the load generator, and
+every authenticated request does a Postgres round trip (user + profile
+lookup) through a per-process connection pool
+(`(DB_POOL_SIZE + DB_MAX_OVERFLOW) × processes`, see
+`docs/bottleneck-analysis.md`). Adding API processes past two only adds
+contention for the same database and CPU. Also visible: p99 is 5–20× p50 at
+every size, a queueing signature rather than a slow-node one.
+
+### Node failure under load
+
+`scripts/lb_experiments.sh failover`: 20 workers POSTing `/memories/write`
+for 25 s, `docker stop infra-api-2` at t=8s.
+
+| nginx config | Requests | 5xx |
+| --- | --- | --- |
+| default retry (idempotent methods only) | 4252 | **14 (0.33%)** |
+| `proxy_next_upstream … non_idempotent` | 4293 | **0** |
+
+Without `non_idempotent`, nginx will not retry a POST that failed mid-flight,
+so the requests in flight on the dying node surfaced as 502. Enabling it fixes
+that; the cost is that a write frame may be applied twice if the node died
+after processing it but before responding. For this system's append-only
+memory stream that is tolerable; for a non-idempotent business operation it
+would need an idempotency key instead. After the node came back it re-entered
+the pool automatically (`fail_timeout` expiry), no nginx restart.
+
+### The balancer as a single point of failure
+
+The one nginx container is itself a SPOF — the whole API tier can be healthy
+and clients still see 100% errors. Remedies: two nginx nodes sharing a virtual
+IP via Keepalived/VRRP (active/passive failover in seconds), or DNS round robin
+across several balancers (cheap, but DNS caching delays failure detection), or
+a cloud L4 load balancer in front of a pair of nginx nodes.

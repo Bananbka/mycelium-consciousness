@@ -6,8 +6,11 @@ services:
       - api
     ports:
       - "80:80"
+    environment:
+      LB_ALGORITHM: "${LB_ALGORITHM-least_conn;}"
+      LB_SERVERS: "${LB_SERVERS-server api:8000 max_fails=3 fail_timeout=15s;}"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
 
   migrate:
     build:
@@ -49,8 +52,28 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:${API_HOST_PORT_RANGE:-18000-18010}:8000"
+
+  # Lab 3 experiment: same image as `api`, artificially slow. Only started
+  # with `--profile slow`; nginx routes to it only if LB_SERVERS names it.
+  api-slow:
+    profiles: ["slow"]
+    build:
+      context: ..
+      dockerfile: services/api/src/api/Dockerfile.api
+    restart: always
+    env_file:
+      - .env
+    environment:
+      SIMULATED_LATENCY_MS: "${SLOW_LATENCY_MS:-300}"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   celery-worker:
     build:
