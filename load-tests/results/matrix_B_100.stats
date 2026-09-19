@@ -1,0 +1,9 @@
+unruffled_bell cpu=40.50% mem=44.92MiB / 7.413GiB
+infra-api-2 cpu=222.72% mem=234.5MiB / 7.413GiB
+infra-api-1 cpu=223.36% mem=242.6MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.11% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=19.59% mem=11.99MiB / 7.413GiB
+clone_redis cpu=11.90% mem=8.148MiB / 7.413GiB
+clone_postgres cpu=45.01% mem=218.4MiB / 7.413GiB
+clone_minio cpu=0.03% mem=133.9MiB / 7.413GiB

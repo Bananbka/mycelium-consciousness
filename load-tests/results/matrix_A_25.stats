@@ -1,0 +1,9 @@
+eloquent_keller cpu=24.49% mem=18.8MiB / 7.413GiB
+infra-api-2 cpu=213.54% mem=233.8MiB / 7.413GiB
+infra-api-1 cpu=107.28% mem=242.4MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.20% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.36MiB / 7.413GiB
+infra-nginx-1 cpu=12.86% mem=10.5MiB / 7.413GiB
+clone_redis cpu=7.80% mem=7.328MiB / 7.413GiB
+clone_postgres cpu=29.54% mem=181.4MiB / 7.413GiB
+clone_minio cpu=10.54% mem=133.9MiB / 7.413GiB

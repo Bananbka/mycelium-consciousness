@@ -1,0 +1,9 @@
+mystifying_gould cpu=25.83% mem=13.17MiB / 7.413GiB
+infra-api-2 cpu=203.28% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=169.84% mem=242.1MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.03% mem=777.2MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.39MiB / 7.413GiB
+infra-nginx-1 cpu=12.75% mem=10.73MiB / 7.413GiB
+clone_redis cpu=6.82% mem=8.301MiB / 7.413GiB
+clone_postgres cpu=30.79% mem=153.2MiB / 7.413GiB
+clone_minio cpu=0.00% mem=127.8MiB / 7.413GiB

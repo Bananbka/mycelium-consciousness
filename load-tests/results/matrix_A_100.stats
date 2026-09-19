@@ -1,0 +1,9 @@
+recursing_napier cpu=32.58% mem=42.85MiB / 7.413GiB
+infra-api-2 cpu=221.81% mem=233.8MiB / 7.413GiB
+infra-api-1 cpu=212.30% mem=242.8MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.11% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=18.76% mem=12.27MiB / 7.413GiB
+clone_redis cpu=6.06% mem=8.156MiB / 7.413GiB
+clone_postgres cpu=44.24% mem=212.1MiB / 7.413GiB
+clone_minio cpu=10.12% mem=134MiB / 7.413GiB

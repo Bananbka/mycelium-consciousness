@@ -1,0 +1,9 @@
+nifty_yonath cpu=30.63% mem=13.39MiB / 7.413GiB
+infra-api-2 cpu=185.08% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=181.61% mem=242.1MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.67% mem=775.9MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.38MiB / 7.413GiB
+infra-nginx-1 cpu=15.12% mem=10.49MiB / 7.413GiB
+clone_redis cpu=11.80% mem=7.855MiB / 7.413GiB
+clone_postgres cpu=50.36% mem=157.8MiB / 7.413GiB
+clone_minio cpu=0.10% mem=127.6MiB / 7.413GiB

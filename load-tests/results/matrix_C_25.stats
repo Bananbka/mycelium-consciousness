@@ -1,0 +1,9 @@
+busy_franklin cpu=29.67% mem=18.49MiB / 7.413GiB
+infra-api-2 cpu=215.69% mem=233.3MiB / 7.413GiB
+infra-api-1 cpu=214.46% mem=242.1MiB / 7.413GiB
+infra-celery-worker-1 cpu=139.48% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=16.80% mem=10.62MiB / 7.413GiB
+clone_redis cpu=8.79% mem=9.602MiB / 7.413GiB
+clone_postgres cpu=49.91% mem=159.1MiB / 7.413GiB
+clone_minio cpu=19.81% mem=134MiB / 7.413GiB

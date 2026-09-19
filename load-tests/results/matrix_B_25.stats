@@ -1,0 +1,9 @@
+nifty_rosalind cpu=34.97% mem=20.14MiB / 7.413GiB
+infra-api-2 cpu=214.48% mem=233.5MiB / 7.413GiB
+infra-api-1 cpu=215.58% mem=242.4MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.17% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=15.27% mem=10.62MiB / 7.413GiB
+clone_redis cpu=14.61% mem=7.91MiB / 7.413GiB
+clone_postgres cpu=36.85% mem=160.5MiB / 7.413GiB
+clone_minio cpu=10.34% mem=133.9MiB / 7.413GiB

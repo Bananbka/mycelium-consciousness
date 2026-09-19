@@ -1,0 +1,9 @@
+great_hawking cpu=20.25% mem=34.63MiB / 7.413GiB
+infra-api-2 cpu=216.85% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=216.19% mem=242.9MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.07% mem=773.7MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=13.39% mem=12MiB / 7.413GiB
+clone_redis cpu=1.65% mem=7.258MiB / 7.413GiB
+clone_postgres cpu=86.43% mem=217MiB / 7.413GiB
+clone_minio cpu=0.00% mem=133.9MiB / 7.413GiB

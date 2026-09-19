@@ -1,0 +1,9 @@
+busy_bartik cpu=19.57% mem=12.3MiB / 7.413GiB
+infra-api-2 cpu=94.71% mem=234.9MiB / 7.413GiB
+infra-api-1 cpu=94.82% mem=242.1MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.21% mem=776.9MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.39MiB / 7.413GiB
+infra-nginx-1 cpu=9.11% mem=10.16MiB / 7.413GiB
+clone_redis cpu=5.47% mem=7.594MiB / 7.413GiB
+clone_postgres cpu=23.95% mem=153.3MiB / 7.413GiB
+clone_minio cpu=0.08% mem=127.7MiB / 7.413GiB

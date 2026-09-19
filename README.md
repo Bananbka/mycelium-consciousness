@@ -504,3 +504,168 @@ the client reconnects.
 - **Cache avalanche:** many keys expiring together — mitigated by the TTL jitter.
 - **Eviction (LRU/LFU):** what Redis drops when `maxmemory` is reached; LRU
   favours recency, LFU frequency. Unset here (see table above).
+
+## Lab 5 — Load testing and performance baseline
+
+Scripts: [`load-tests/mycelium.js`](load-tests/mycelium.js) (k6), runner
+`scripts/run_load_tests.sh`, report generator `load-tests/summarize.py`. Raw
+k6 exports, container CPU samples and DB counters are in `load-tests/results/`,
+the generated tables in `load-tests/results/REPORT.md`, charts in
+`load-tests/charts/`. Reproduce:
+
+```bash
+bash scripts/run_load_tests.sh prep      # create 50 accounts + seed backups
+bash scripts/run_load_tests.sh matrix    # 3 scenarios x load levels
+bash scripts/run_load_tests.sh low       # 2 and 5 VUs (locates the knee)
+bash scripts/run_load_tests.sh scaling   # 1 vs 3 instances
+bash scripts/run_load_tests.sh cache     # scenario A with the cache bypassed
+uv run --with matplotlib python load-tests/summarize.py
+```
+
+### Scenarios
+
+| | Type | Flow | Resource profile |
+| --- | --- | --- | --- |
+| A | Read-intensive | `GET /memories/backups?limit=50` | Redis cache + Postgres read, 50 accounts with 50 backups each |
+| B | Write-intensive | `POST /memories/write` | JWT check + Postgres auth lookup + Redis `XADD` |
+| C | Complex workflow | `GET /profiles/me` → 3× `POST /memories/write` → `GET /memories/stream/status` → `GET /memories/backups` | mixed read / compute / write, 6 requests per iteration |
+
+Each run is a 10 s warm-up (connection pools, DNS, bytecode; not measured) then
+30 s of constant VUs; metrics come only from the measured phase. VUs spread
+over 50 pre-registered accounts, so writes hit 50 different Redis streams
+rather than one hot key. Think time is zero (closed loop).
+
+### Baseline environment
+
+One Windows laptop, Docker Desktop VM: 12 vCPU, 7.4 GiB RAM, no per-container
+limits. **2 `api` replicas** × 2 uvicorn workers each (`API_WORKERS=2`),
+Postgres pool `DB_POOL_SIZE=10` + `DB_MAX_OVERFLOW=5` per process, nginx
+`least_conn`, Redis with the cache on (db 1, TTL 60 s), 1 Celery worker + beat.
+The k6 generator runs in its own container capped at `--cpus=2` on the same
+Docker network; the host cannot be split further, so generator and system
+under test still share physical cores.
+
+### Results: throughput and latency by load
+
+Full tables (avg/p50/p95/p99 and error rate for every level, including 2, 5
+and 25 VUs) are in `load-tests/results/REPORT.md`; the four levels the lab
+asks for:
+
+| Scenario | VUs | RPS | Avg ms | p50 | p95 | p99 | Error % |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A read | 10 | 257 | 24 | 21 | 36 | 49 | 0.00 |
+| A read | 50 | 268 | 113 | 99 | 158 | 315 | 0.00 |
+| A read | 100 | 214 | 274 | 145 | 1012 | 2189 | 0.00 |
+| A read | 200 | 253 | 463 | 135 | 1955 | 3706 | 0.00 |
+| B write | 10 | 314 | 19 | 17 | 31 | 44 | 0.00 |
+| B write | 50 | 216 | 138 | 120 | 196 | 312 | 0.00 |
+| B write | 100 | 226 | 261 | 221 | 454 | 1365 | 0.00 |
+| B write | 200 | 211 | 546 | 410 | 1399 | 2915 | 0.00 |
+| C workflow | 10 | 228 | 24 | 20 | 43 | 61 | 0.00 |
+| C workflow | 50 | 238 | 120 | 102 | 191 | 375 | 0.00 |
+| C workflow | 100 | 260 | 235 | 182 | 512 | 914 | 0.00 |
+| C workflow | 200 | 242 | 482 | 240 | 1563 | 2897 | 0.00 |
+
+![Throughput vs load](load-tests/charts/throughput.png)
+![Latency percentiles vs load](load-tests/charts/latency.png)
+
+**Mean vs tail.** At 200 VUs scenario A has a 463 ms average but a 3.7 s p99
+and a p50 of only 135 ms: most requests are still fast while a minority queue
+behind saturated workers, so the mean hides the pain. Tail latency grows
+non-linearly because once arrivals exceed service capacity, queue wait, not
+service time, dominates, and it is unevenly distributed (unlucky requests land
+behind full worker queues and pool waits).
+
+### Saturation point and primary bottleneck
+
+Throughput stops growing almost immediately: it is 117–145 RPS at 2 VUs,
+217–231 at 5 VUs, and roughly **230–310 RPS from 10 VUs on, flat up to 200
+VUs** (±15% run-to-run noise). Beyond ~10 VUs extra users buy nothing but
+latency (scenario B p99: 44 ms at 10 VUs, 2915 ms at 200). Errors stayed at 0%
+even at 200 VUs: degradation shows up as queueing latency, not failures (k6's
+60 s timeout is never reached).
+
+**Primary bottleneck: CPU of the Python API workers.** Container CPU sampled
+mid-run (`load-tests/results/*.stats`, 100 VUs, scenario B):
+
+| Container | CPU |
+| --- | --- |
+| `api-1` / `api-2` | ~222% each (both workers pegged) |
+| Postgres | 45% |
+| nginx | 20% |
+| Redis | 12% |
+
+Every request pays for JWT verification, an authenticated Postgres lookup
+(deliberately uncached, see lab 4), Pydantic validation and JSON serialization
+in Python; four workers saturate around 250 RPS (about 60 RPS per core) while
+the database has headroom. This refines the lab 3 finding: on this hardware
+the first wall is API compute, and the Postgres pool
+(`(10+5) × 4 processes = 60` connections) becomes the next one if workers are
+added.
+
+### Scaling impact (100 VUs, 1 vs 2 vs 3 instances)
+
+| Scenario | Instances | RPS | p95 ms | p99 ms | Efficiency (RPS ÷ N·RPS₁) |
+| --- | --- | --- | --- | --- | --- |
+| A | 1 | 173 | 1668 | 3305 | 1.00 |
+| A | 2 | 214 | 1012 | 2189 | 0.62 |
+| A | 3 | 238 | 424 | 1491 | 0.46 |
+| B | 1 | 166 | 934 | 2120 | 1.00 |
+| B | 2 | 226 | 454 | 1365 | 0.68 |
+| B | 3 | 291 | 285 | 686 | 0.59 |
+
+Adding instances helps sub-linearly (efficiency 0.46–0.68): the extra
+processes compete with Postgres, Redis, nginx and the load generator for the
+same host CPU. Tail latency improves faster than throughput (B p99: 2120 ms
+with 1 instance, 686 ms with 3). Read scenario A gains little beyond 2
+instances (238 vs 214 RPS is within noise).
+
+### Caching impact (scenario A, 100 VUs, 2 instances)
+
+| Mode | RPS | p50 ms | p95 ms | p99 ms | `memory_backups` rows read |
+| --- | --- | --- | --- | --- | --- |
+| cache disabled (`Cache-Control: no-cache`) | 186 | 179 | 869 | 1937 | 16,780 |
+| cache enabled (warm) | 214 | 145 | 1012 | 2189 | 2,833 |
+
+The cache removes **83% of reads on the cached table** and gives +15% RPS and
+−19% p50, but p95/p99 are not better (within run-to-run noise). The reason is
+the bottleneck above: the request still burns API CPU on auth and
+serialization, so shielding the database does not raise the ceiling here. The
+benefit is database headroom, not raw latency.
+
+### System performance baseline
+
+```
+=== SYSTEM PERFORMANCE BASELINE ===
+Environment Config: 12 vCPU / 7.4 GiB Docker VM, no container limits;
+                    2 api replicas x 2 workers, DB pool 10+5 per process,
+                    nginx least_conn, Redis cache on (TTL 60s), k6 --cpus=2
+Stable Throughput:  ~230-310 RPS with p95 < 45 ms (reached at ~10 VUs)
+Saturation Point:   ~5-10 VUs (~250 RPS); flat to 200 VUs
+p95 / p99 Latency:  A 36 / 49 ms, B 31 / 44 ms, C 43 / 61 ms at 10 VUs;
+                    beyond saturation p99 reaches 2.9-3.7 s at 200 VUs
+Error Rate:         0.00% up to 200 VUs (degrades by latency, not errors)
+Critical Scenario:  C (complex workflow): highest latency at equal VUs
+                    (p99 61 ms at 10 VUs); B degrades fastest past saturation
+Primary Bottleneck: API worker CPU (~220% per api container vs Postgres 45%)
+```
+
+### Caveats and theory
+
+- **Noise.** Each point is one 30 s run. Identical configurations differed by
+  ~15% (scenario A at 100 VUs: 258 and 214 RPS in two runs), and some
+  non-monotonic points (A at 25 VUs) are noise-level. Trends and orders of
+  magnitude are trustworthy, single-digit percentages are not.
+- **Coordinated omission.** This is a closed-loop test: a VU waits for its
+  response before sending the next request, so when the server stalls the
+  generator silently stops sending and the missing (slow) requests are never
+  measured. Reported tail latencies under saturation are therefore **lower
+  bounds**. An open-model executor (`constant-arrival-rate`) would expose the
+  true tail.
+- **GC / JIT.** CPython has no JIT, so the warm-up here mainly primes
+  connection pools, DNS and import/bytecode caches; garbage-collector pauses
+  would show up as isolated p99/max spikes. On JVM/Node targets, JIT
+  compilation and GC pauses skew percentiles right after start, which is why a
+  warm-up phase is discarded.
+- **Isolation.** Generator and SUT share one host; `--cpus=2` bounds the
+  generator, but a real baseline needs a separate machine.

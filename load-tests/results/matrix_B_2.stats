@@ -1,0 +1,9 @@
+dreamy_elgamal cpu=19.81% mem=11.85MiB / 7.413GiB
+infra-api-2 cpu=94.99% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=94.80% mem=242.3MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.29% mem=774MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.38MiB / 7.413GiB
+infra-nginx-1 cpu=8.83% mem=10.14MiB / 7.413GiB
+clone_redis cpu=7.02% mem=7.672MiB / 7.413GiB
+clone_postgres cpu=21.90% mem=160.9MiB / 7.413GiB
+clone_minio cpu=10.38% mem=131.7MiB / 7.413GiB

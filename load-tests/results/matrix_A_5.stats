@@ -1,0 +1,9 @@
+pensive_newton cpu=20.30% mem=13.23MiB / 7.413GiB
+infra-api-2 cpu=199.53% mem=234.7MiB / 7.413GiB
+infra-api-1 cpu=115.15% mem=242.3MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.06% mem=773.9MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.38MiB / 7.413GiB
+infra-nginx-1 cpu=10.60% mem=10.17MiB / 7.413GiB
+clone_redis cpu=4.32% mem=7.336MiB / 7.413GiB
+clone_postgres cpu=36.72% mem=163.2MiB / 7.413GiB
+clone_minio cpu=0.00% mem=131.6MiB / 7.413GiB

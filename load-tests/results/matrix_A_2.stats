@@ -1,0 +1,9 @@
+nice_ramanujan cpu=20.15% mem=11.7MiB / 7.413GiB
+infra-api-2 cpu=94.29% mem=234.4MiB / 7.413GiB
+infra-api-1 cpu=94.94% mem=242.1MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.18% mem=773.9MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.37MiB / 7.413GiB
+infra-nginx-1 cpu=9.35% mem=9.879MiB / 7.413GiB
+clone_redis cpu=4.23% mem=7.316MiB / 7.413GiB
+clone_postgres cpu=32.49% mem=162.8MiB / 7.413GiB
+clone_minio cpu=0.10% mem=131.6MiB / 7.413GiB
