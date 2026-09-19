@@ -235,3 +235,69 @@ uv run --package api seed-admin ops@example.com <password>
   analysis of at least three potential degradation points under high load.
 - [`docs/raci-matrix.md`](docs/raci-matrix.md) — responsibility matrix and
   module breakdown for the two-person team.
+
+## Lab 2 — Stateless architecture
+
+### State audit
+
+| Category | What | Where it lives |
+| --- | --- | --- |
+| Ephemeral / local safe | request-scoped DB session, logs, `INSTANCE_ID` (read once from env/hostname, never mutated) | process memory, discarded per request |
+| Shared / externalized | users, profiles, subscription tier, buffered memory, backup metadata | Postgres |
+| Shared / externalized | hot write buffer (`clone-stream:{id}`), Celery broker | Redis |
+| Shared / externalized | backup payloads | MinIO |
+| Shared / externalized | auth state | none — stateless JWT, user re-read from Postgres on every request |
+| Critical stateful (removed / absent) | in-memory collections, local caches, app-level locks, local counters, file sessions | none in the API; the only lock is Postgres `SELECT ... FOR UPDATE` on `memory_buffers` |
+
+In-memory dependencies eliminated: the write buffer is Redis, not a process
+list; flush serialization uses a row lock in Postgres, not a Python lock;
+sessions are JWTs, not server-side files or dicts.
+
+### Request flow (`POST /memories/write`)
+
+1. Input: `Authorization: Bearer <JWT>` + `{"content": ...}`; `clone_id` is
+   resolved from the token, never from the body.
+2. Context read: user + profile from Postgres.
+3. Atomic state change: one Redis `XADD` (returns stream length).
+4. Nothing is retained in the process afterwards.
+
+### Multi-instance run and identification
+
+```bash
+docker compose -f infra/docker-compose.yaml up -d --build --scale api=2
+docker compose -f infra/docker-compose.yaml restart nginx   # re-resolve upstream
+```
+
+Every response carries `X-Instance-ID` (container hostname, overridable via
+`INSTANCE_ID`); `GET /health` also returns it.
+
+```bash
+for i in 1 2 3 4; do curl -si http://localhost/health | grep -i x-instance-id; done
+```
+
+### Cross-instance consistency (no sticky sessions)
+
+`scripts/cross_instance_check.sh` registers a clone, then alternates
+`GET /profiles/me` and `PATCH /profiles/{id}` through nginx (`least_conn`, no
+`ip_hash`) and prints the serving instance for each call plus the status read
+back, which must match what was just written regardless of instance.
+
+### Instance-loss scenario
+
+```bash
+docker compose -f infra/docker-compose.yaml ps api          # note both names
+docker stop <one api container>                              # mid-run
+bash scripts/cross_instance_check.sh                         # still succeeds, served by the survivor
+```
+
+Writes already accepted are in Redis/Postgres, not in the stopped process, so
+nothing is lost; nginx's passive check (`max_fails=3 fail_timeout=15s`) drops
+the dead upstream. Restart nginx after re-scaling (upstream IPs are resolved
+at startup).
+
+### Stateless vs. no data, and hidden affinity
+
+Stateless means the *process* holds no per-client state — data still exists,
+in shared stores. Hidden affinity risks: in-process caches or counters,
+local files, node-local locks, and anything that only works because the
+same client keeps hitting the same node.
