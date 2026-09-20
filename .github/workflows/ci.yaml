@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  quality:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,26 +30,13 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
 
-      - name: Apply migrations, then verify they match the ORM models
-        run: |
-          uv run alembic -c shared/alembic.ini upgrade head
-          uv run alembic -c shared/alembic.ini check
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
-
-      - name: Tests
-        run: uv run pytest
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
-          CELERY_BROKER_URL: redis://localhost:6379/0
-          JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
-
+  test:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: clone_memory_db
     services:
       db:
         image: postgres:16-alpine
@@ -70,3 +60,108 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:9000/minio/health/ready && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install workspace
+        run: uv sync --all-packages --dev --group test --frozen
+
+      - name: Apply migrations, then verify they match the ORM models
+        run: |
+          uv run alembic -c shared/alembic.ini upgrade head
+          uv run alembic -c shared/alembic.ini check
+
+      - name: Tests
+        run: uv run pytest
+        env:
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
+          MINIO_ENDPOINT: http://localhost:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          MINIO_BUCKET: clone-ci-test
+
+  docker:
+    name: docker (${{ matrix.service }})
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: services/api/src/api/Dockerfile.api
+          - service: celery
+            dockerfile: services/celery/src/Dockerfile.celery
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image name and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.service }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Log in to ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
