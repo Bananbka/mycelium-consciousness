@@ -11,7 +11,9 @@ COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY services ./services
 
-RUN pip install --no-cache-dir uv && uv sync --package api --frozen --no-dev
+RUN pip install --no-cache-dir uv \
+    && pip uninstall -y setuptools wheel \
+    && uv sync --package api --frozen --no-dev
 
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app
