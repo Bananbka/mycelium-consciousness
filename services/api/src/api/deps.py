@@ -19,9 +19,9 @@ DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 _bearer = HTTPBearer(auto_error=False)
 
 UNAUTHORIZED = HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Not authenticated",
-                        headers={"WWW-Authenticate": "Bearer"},
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Not authenticated",
+    headers={"WWW-Authenticate": "Bearer"},
 )
 
 
