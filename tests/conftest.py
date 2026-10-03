@@ -7,14 +7,35 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-# At least 32 bytes, or PyJWT warns the HMAC key is too short for SHA256.
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-pytest-only-0123456789")
+# The suite always runs as APP_ENV=test, even if the shell exports sandbox or
+# production, so it can never pick up a real environment's file or credentials.
+# Everything below is a throwaway local-test value; CI and developers override
+# any of them through the real environment (setdefault never wins over that).
+os.environ["APP_ENV"] = "test"
+os.environ.pop("ENV_FILE", None)
+_TEST_ENV_DEFAULTS = {
+    "POSTGRES_USER": "admin",
+    "POSTGRES_PASSWORD": "test-only-db-password",
+    "POSTGRES_HOST": "localhost",
+    "POSTGRES_DB": "clone_memory",
+    "CELERY_BROKER_URL": "redis://localhost:6379/0",
+    "CELERY_RESULT_BACKEND": "redis://localhost:6379/0",
+    "MINIO_ENDPOINT": "http://localhost:9000",
+    "MINIO_ACCESS_KEY": "test-only-minio-user",
+    "MINIO_SECRET_KEY": "test-only-minio-secret",
+    "MINIO_BUCKET": "memory-backups-test",
+    # At least 32 bytes, or PyJWT warns the HMAC key is too short for SHA256.
+    "JWT_SECRET_KEY": "test-secret-key-for-pytest-only-0123456789",
+}
+for _name, _value in _TEST_ENV_DEFAULTS.items():
+    os.environ.setdefault(_name, _value)
 
 from api.main import app  # noqa: E402
 from api.security import hash_password  # noqa: E402
 from shared import object_storage, streams  # noqa: E402
 from shared.db.db import get_db  # noqa: E402
 from shared.db.models import Base, CloneProfile, User, UserRole  # noqa: E402
+from shared.settings import settings  # noqa: E402
 
 
 def _test_database_url() -> str:
@@ -27,12 +48,8 @@ def _test_database_url() -> str:
     if url := os.getenv("TEST_DATABASE_URL"):
         return url
 
-    user = os.getenv("POSTGRES_USER", "admin")
-    password = os.getenv("POSTGRES_PASSWORD", "secretpassword")
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    database = os.getenv("POSTGRES_DB", "clone_memory") + "_test"
-    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}"
+    database = settings.postgres_db + "_test"
+    return settings.database_url.rsplit("/", 1)[0] + "/" + database
 
 
 def _database_name(url: str) -> str:

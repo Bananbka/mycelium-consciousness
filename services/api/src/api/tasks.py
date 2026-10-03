@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import os
-
 from celery import Celery
 
-BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
-TASK_QUEUE = os.getenv("CELERY_TASK_QUEUE", "memory_batches")
+from shared.settings import settings
+
+BROKER_URL = settings.celery_broker_url
+RESULT_BACKEND = settings.celery_result_backend
+TASK_QUEUE = settings.celery_task_queue
 
 _client = Celery("clone_memory_api_client", broker=BROKER_URL, backend=RESULT_BACKEND)
 _client.conf.task_default_queue = TASK_QUEUE

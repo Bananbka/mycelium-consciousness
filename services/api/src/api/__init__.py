@@ -1,15 +1,15 @@
-import os
-
 import uvicorn
+
+from shared.settings import settings
 
 
 def main() -> None:
-    reload = os.getenv("API_RELOAD", "false").lower() in {"1", "true", "yes"}
+    reload = settings.api_reload
     uvicorn.run(
         "api.main:app",
-        host=os.getenv("API_HOST", "0.0.0.0"),
-        port=int(os.getenv("API_PORT", "8000")),
+        host=settings.api_host,
+        port=settings.api_port,
         reload=reload,
-        workers=None if reload else int(os.getenv("API_WORKERS", "2")),
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        workers=None if reload else settings.api_workers,
+        log_level=settings.log_level.lower(),
     )

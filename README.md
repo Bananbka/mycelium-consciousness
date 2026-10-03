@@ -77,7 +77,7 @@ for long.
 
 `memory_buffers` in Postgres is the second, coarser buffer: everything
 flushed out of Redis lives there, durable, until its clone's subscription
-tier says it's time for a backup rollup (see below). This second stage is
+tier says it's time for a backup rollup (see "Scale the stateless API" above). This second stage is
 what actually absorbs a slow or paused rollup schedule — Postgres can hold
 far more than Redis's working-memory footprint without risking the whole
 service.
@@ -129,31 +129,26 @@ uv run ruff format --check .
 uv run pre-commit run --all-files
 ```
 
-Run local infrastructure:
-
-```bash
-cp infra/.env.example infra/.env
-docker compose -f infra/docker-compose.yaml up --build
-```
-
-The stack is reached through nginx on `http://localhost` — `GET /health` for
-the API. The `migrate` service applies Alembic migrations to completion before
-`api`, `celery-worker`, and `celery-beat` start.
+Run the stack in one of two environments — see [Environments](#environments).
 
 Scale the stateless API horizontally:
 
 ```bash
-docker compose -f infra/docker-compose.yaml up --scale api=3
+docker compose --env-file infra/.env.sandbox -p clone-sandbox \
+  -f infra/docker-compose.yaml up --scale api=3
 ```
 
 Database migrations:
 
 ```bash
+export APP_ENV=sandbox   # reads infra/.env.sandbox
 uv run alembic -c shared/alembic.ini upgrade head
 uv run alembic -c shared/alembic.ini check    # fails if models drift from schema
 ```
 
-Run the tests (needs reachable Postgres, Redis, and MinIO instances):
+Run the tests (needs reachable Postgres, Redis, and MinIO instances; the suite
+forces `APP_ENV=test` and falls back to throwaway local credentials — export
+`POSTGRES_*`, `CELERY_BROKER_URL`, `MINIO_*` to point it at your instances):
 
 ```bash
 uv sync --all-packages --dev --group test
@@ -174,7 +169,8 @@ After recreating or scaling `api`, reload the gateway so it re-resolves the
 upstream address:
 
 ```bash
-docker compose -f infra/docker-compose.yaml restart nginx
+docker compose --env-file infra/.env.sandbox -p clone-sandbox \
+  -f infra/docker-compose.yaml restart nginx
 ```
 
 ### Load-testing the write path
@@ -191,6 +187,84 @@ uv run --with httpx python tools/load_generator.py \
 It reports throughput and p50/p99 latency. Every write is one `INSERT` into
 `memory_buffers`, so this doubles as the write path's real ceiling — there is
 no separate low-level path to compare it against anymore.
+
+## Environments
+
+Configuration lives in the process environment, read through one typed model,
+`shared.settings.Settings` (pydantic-settings). No password, key or connection
+string is hard-coded or has a default: a missing secret stops startup. `APP_ENV`
+(`sandbox`, `production`, or `test` for the pytest suite) selects which file is
+layered under the real environment variables — `.env.<APP_ENV>`, looked up in
+the working directory and `infra/`, or the path in `ENV_FILE`. Real environment
+variables always win over the file.
+
+| | Sandbox | Production |
+| --- | --- | --- |
+| File | `infra/.env.sandbox` | `infra/.env.production` |
+| `DEBUG` | `true` allowed | forced `false` (startup fails otherwise) |
+| Postgres database | `clone_memory_sandbox` | `clone_memory_production` |
+| Backup bucket | `memory-backups-sandbox` | `memory-backups-production` |
+| Compose project (volumes) | `clone-sandbox` | `clone-production` |
+| API docs (`/docs`) | on | off |
+| Unhandled 500 | Starlette debug page | opaque JSON + `error_id` |
+
+The two environments never share data: each has its own database, bucket,
+Redis and named volumes (the compose project name namespaces them), and the
+host ports differ so both can run side by side. Startup also refuses the
+obvious mix-ups: production rejects `DEBUG`, `API_RELOAD`,
+`ALLOW_INSECURE_JWT_SECRET`, `CHANGE_ME` placeholders and any database/bucket
+name containing `sandbox` or `test`; sandbox rejects names containing `prod`.
+
+The `.env.*` files are gitignored; only the `*.example` templates are tracked.
+
+### Run the sandbox
+
+```bash
+cp infra/.env.sandbox.example infra/.env.sandbox
+docker compose --env-file infra/.env.sandbox -p clone-sandbox   -f infra/docker-compose.yaml up -d --build
+docker compose --env-file infra/.env.sandbox -p clone-sandbox   -f infra/docker-compose.yaml exec api   uv run --package api --frozen --no-sync seed-admin <email> <password>
+```
+
+Reached through nginx on `http://localhost` (`GET /health`), Swagger UI on
+`/docs`. The `migrate` service applies Alembic migrations to completion before
+`api`, `celery-worker` and `celery-beat` start.
+
+### Run production
+
+```bash
+cp infra/.env.production.example infra/.env.production
+# replace every CHANGE_ME; generate the JWT key with
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+docker compose --env-file infra/.env.production -p clone-production   -f infra/docker-compose.yaml up -d --build
+```
+
+Reached on `http://localhost:81` by default (`NGINX_HOST_PORT`). `--env-file`
+feeds compose's own interpolation (ports, database name); the same file is
+passed into each container through `env_file`. After recreating or scaling
+`api`, restart nginx in that project (see "Scale the stateless API" above).
+
+Without the app server: `APP_ENV=sandbox uv run alembic -c shared/alembic.ini
+upgrade head` and `APP_ENV=sandbox uv run --package api api` read the same
+files from `infra/` (use `POSTGRES_HOST=localhost` and the published ports).
+
+### Unhandled errors
+
+A request that raises an unexpected exception gets
+`{"detail": "Internal server error", "error_id": "<hex>"}` with status 500 — no
+stack trace, file path or SQL. The full traceback is written to the server log
+under the same `error_id`, so an operator can find it from a user's report.
+
+## CI/CD
+
+`.github/workflows/ci.yaml` runs on every pull request and every push to
+`main`:
+
+1. `quality` — `ruff check`, `ruff format --check`, `uv lock --check`, Alembic
+   migrate + drift check, then the full `pytest` suite against throwaway
+   Postgres, Redis and MinIO instances (`APP_ENV=test`, CI-only credentials).
+2. `build` (after `quality` passes) — validates the compose file for both
+   environments and builds the API and Celery images, so whatever lands on
+   `main` is deployable.
 
 ## Users, roles and access control
 

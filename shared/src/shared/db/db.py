@@ -1,23 +1,15 @@
-import os
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-POSTGRES_USER = os.getenv("POSTGRES_USER", "admin")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "secretpassword")
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "clone_memory_db")
+from shared.settings import settings
 
-POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
-MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "5"))
-POOL_RECYCLE_SECONDS = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+POOL_SIZE = settings.db_pool_size
+MAX_OVERFLOW = settings.db_max_overflow
+POOL_RECYCLE_SECONDS = settings.db_pool_recycle
 
-DATABASE_URL = (
-    f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
-    f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-)
+DATABASE_URL = settings.database_url
 
 
 class Base(DeclarativeBase):

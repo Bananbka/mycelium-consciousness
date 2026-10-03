@@ -5,6 +5,26 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI always runs as APP_ENV=test: its own throwaway Postgres, Redis and MinIO,
+# never a sandbox or production resource. The values below are CI-only.
+env:
+  APP_ENV: test
+  POSTGRES_HOST: localhost
+  POSTGRES_USER: admin
+  POSTGRES_PASSWORD: ci-only-db-password
+  POSTGRES_DB: clone_memory_ci
+  CELERY_BROKER_URL: redis://localhost:6379/0
+  CELERY_RESULT_BACKEND: redis://localhost:6379/0
+  MINIO_ENDPOINT: http://localhost:9000
+  MINIO_ACCESS_KEY: ci-only-minio-user
+  MINIO_SECRET_KEY: ci-only-minio-secret
+  MINIO_BUCKET: memory-backups-ci-test
+  JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -27,33 +47,34 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
 
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
+            -e MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
+            minio/minio:latest server /data
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/ready && exit 0
+            sleep 2
+          done
+          docker logs minio
+          exit 1
+
       - name: Apply migrations, then verify they match the ORM models
         run: |
           uv run alembic -c shared/alembic.ini upgrade head
           uv run alembic -c shared/alembic.ini check
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
 
       - name: Tests
         run: uv run pytest
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
-          CELERY_BROKER_URL: redis://localhost:6379/0
-          JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
 
     services:
       db:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
+          POSTGRES_PASSWORD: ci-only-db-password
+          POSTGRES_DB: clone_memory_ci
         ports:
           - 5432:5432
         options: >-
@@ -70,3 +91,24 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+
+  # Continuous delivery gate: both environments' compose files must resolve and
+  # both service images must build, so a merge to main is always deployable.
+  build:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose for sandbox and production
+        run: |
+          for env in sandbox production; do
+            docker compose --env-file "infra/.env.$env.example" \
+              -p "clone-$env" -f infra/docker-compose.yaml config -q
+          done
+
+      - name: Build API image
+        run: docker build -f services/api/src/api/Dockerfile.api -t clone-api:ci .
+
+      - name: Build Celery image
+        run: docker build -f services/celery/src/Dockerfile.celery -t clone-celery:ci .

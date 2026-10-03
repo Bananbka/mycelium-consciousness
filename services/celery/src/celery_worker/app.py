@@ -5,7 +5,6 @@ rather than imported here, which would be circular.
 """
 
 import asyncio
-import os
 import threading
 
 from celery import Celery
@@ -13,10 +12,11 @@ from celery.signals import worker_process_init, worker_process_shutdown
 
 from shared import object_storage
 from shared.db import dispose_engine
+from shared.settings import settings
 
-BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
-TASK_QUEUE = os.getenv("CELERY_TASK_QUEUE", "memory_batches")
+BROKER_URL = settings.celery_broker_url
+RESULT_BACKEND = settings.celery_result_backend
+TASK_QUEUE = settings.celery_task_queue
 
 app = Celery(
     "clone_memory_worker",
@@ -32,8 +32,8 @@ app.conf.worker_prefetch_multiplier = 1
 app.conf.task_acks_late = True
 app.conf.broker_connection_retry_on_startup = True
 
-ROLLUP_CHECK_INTERVAL_SECONDS = int(os.getenv("ROLLUP_CHECK_INTERVAL_SECONDS", "3600"))
-STREAM_FLUSH_INTERVAL_SECONDS = int(os.getenv("STREAM_FLUSH_INTERVAL_SECONDS", "60"))
+ROLLUP_CHECK_INTERVAL_SECONDS = settings.rollup_check_interval_seconds
+STREAM_FLUSH_INTERVAL_SECONDS = settings.stream_flush_interval_seconds
 app.conf.beat_schedule = {
     "flush-due-streams": {
         "task": "memory.flush_due_streams",
