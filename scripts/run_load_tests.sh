@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Lab 5 runner. Usage: scripts/run_load_tests.sh <matrix|scaling|cache|prep|low|extra|ramp>
-# Results land in load-tests/results/*.json (k6 --summary-export).
 export MSYS_NO_PATHCONV=1
 set -euo pipefail
 cd "$(dirname "$0")/.."

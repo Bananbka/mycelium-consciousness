@@ -1,0 +1,8 @@
+infra-nginx-1 cpu=0.00% mem=9.68MiB / 7.413GiB
+infra-api-2 cpu=0.59% mem=223.3MiB / 7.413GiB
+infra-celery-beat-1 cpu=0.00% mem=76.36MiB / 7.413GiB
+infra-celery-worker-1 cpu=0.07% mem=771.6MiB / 7.413GiB
+infra-api-1 cpu=0.51% mem=229.9MiB / 7.413GiB
+clone_postgres cpu=0.00% mem=85.27MiB / 7.413GiB
+clone_redis cpu=0.73% mem=5.594MiB / 7.413GiB
+clone_minio cpu=16.78% mem=110.7MiB / 7.413GiB

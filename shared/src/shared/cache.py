@@ -1,10 +1,3 @@
-"""Cache-aside helpers on Redis (lab 4). Fail-open: a dead cache never fails a request.
-
-Key scheme: ``cache:<version>:<domain>:<entity-id>:<params-hash>`` e.g.
-``cache:v1:backups:42:9f2c1a7e``. The entity id sits before the params hash so
-one entity's every variant can be dropped with a single prefix scan.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -25,11 +18,9 @@ CACHE_REDIS_URL = os.getenv(
     os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0").rsplit("/", 1)[0] + "/1",
 )
 KEY_VERSION = "v1"
-# Business rule: a clone's backup list may lag reality by at most this long if
-# an explicit invalidation is ever missed. Rollups/restores invalidate at once.
 BACKUPS_TTL_SECONDS = int(os.getenv("CACHE_BACKUPS_TTL_SECONDS", "60"))
 SOCKET_TIMEOUT = float(os.getenv("CACHE_SOCKET_TIMEOUT_SECONDS", "0.5"))
-TTL_JITTER = 0.1  # +-10% so keys created together do not expire together
+TTL_JITTER = 0.1
 
 _client: redis.Redis | None = None
 
@@ -40,7 +31,6 @@ def _get_client() -> redis.Redis:
         _client = redis.from_url(
             CACHE_REDIS_URL,
             decode_responses=True,
-            # Fail fast: a stopped Redis must degrade to the DB, not hang.
             socket_connect_timeout=SOCKET_TIMEOUT,
             socket_timeout=SOCKET_TIMEOUT,
         )

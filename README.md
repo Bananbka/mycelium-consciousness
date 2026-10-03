@@ -9,6 +9,16 @@ restored to a past state after it fails. There is no semantic search, no
 embeddings, and no read path inside the system at all — only write, roll up,
 and restore.
 
+## Lab map
+
+| Lab | Topic | Where |
+| --- | --- | --- |
+| 1 | System design, API, persistence, bottleneck analysis | [Architecture](#architecture), [API and high-load scenario](#api-and-high-load-scenario), [Lab 1 deliverables](#lab-1--deliverables) |
+| 2 | Stateless architecture | [Lab 2](#lab-2--stateless-architecture) |
+| 3 | Horizontal scaling, load balancing | [Lab 3](#lab-3--horizontal-scaling-and-load-balancing) |
+| 4 | Distributed caching | [Lab 4](#lab-4--distributed-caching-cache-aside) |
+| 5 | Load testing, performance baseline | [Lab 5](#lab-5--load-testing-and-performance-baseline) |
+
 ## Architecture
 
 ![Architecture of Mycelium Consciousness](docs/media/mycelium-consciousness-architecture.png)
@@ -220,9 +230,10 @@ uv run --with httpx python tools/load_generator.py \
   --password alphapass123 --rate 200 --duration 30 --concurrency 20
 ```
 
-It reports throughput and p50/p99 latency. Every write is one `INSERT` into
-`memory_buffers`, so this doubles as the write path's real ceiling — there is
-no separate low-level path to compare it against anymore.
+It reports throughput and p50/p99 latency. Each write is one authenticated
+HTTP request ending in a single Redis `XADD` (Postgres is touched only for the
+auth lookup), so this measures the real write path end to end. The k6 suite in
+`load-tests/` (lab 5) is the reproducible, staged version of the same idea.
 
 ## Users, roles and access control
 
@@ -261,12 +272,92 @@ Admins cannot self-register; seed one out of band:
 uv run --package api seed-admin ops@example.com <password>
 ```
 
-## Project reports
+## Lab 1 — Deliverables
 
-- [`docs/bottleneck-analysis.md`](docs/bottleneck-analysis.md) — theoretical
-  analysis of at least three potential degradation points under high load.
-- [`docs/raci-matrix.md`](docs/raci-matrix.md) — responsibility matrix and
-  module breakdown for the two-person team.
+### Data model
+
+```mermaid
+erDiagram
+    users ||--o| clone_profiles : "owns (user_id, nullable unique)"
+    clone_profiles ||--o| memory_buffers : "live, not yet archived"
+    clone_profiles ||--o{ memory_backups : "archived periods"
+    users { int id PK
+            string email
+            string role "clone | admin" }
+    clone_profiles { int id PK
+                     int user_id FK
+                     string status
+                     string subscription_tier }
+    memory_buffers { int clone_id PK
+                     bytea payload_blob "msgpack+gzip"
+                     int entry_count }
+    memory_backups { int id PK
+                     int clone_id FK
+                     string storage_key "object in MinIO"
+                     int entry_count
+                     string subscription_tier }
+```
+
+Protocols between components: client → nginx → api over HTTP/1.1 with a JWT
+bearer token; api → Redis over RESP (`XADD`); api/celery → Postgres over
+asyncpg (SQL); celery → MinIO over S3 (HTTP); api → celery over the Redis
+broker (Celery task messages).
+
+### Cold start and demo (5 endpoints)
+
+```bash
+cp infra/.env.example infra/.env
+docker compose -f infra/docker-compose.yaml up -d --build
+docker compose -f infra/docker-compose.yaml exec api   uv run --package api --frozen --no-sync seed-admin ops@example.com 'AdminPass-123'
+
+# 1. register   2. login   3. profile   4. write   5. backups
+curl -s -X POST http://localhost/auth/register -H 'Content-Type: application/json'   -d '{"email":"me@example.com","password":"changeme-123","designation":"clone-me"}'
+TOKEN=$(curl -s -X POST http://localhost/auth/login -H 'Content-Type: application/json'   -d '{"email":"me@example.com","password":"changeme-123"}' | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+curl -s http://localhost/profiles/me -H "Authorization: Bearer $TOKEN"
+curl -si -X POST http://localhost/memories/write -H "Authorization: Bearer $TOKEN"   -H 'Content-Type: application/json' -d '{"content":"first frame"}'      # 202
+curl -s http://localhost/memories/backups -H "Authorization: Bearer $TOKEN"
+```
+
+Admin-only demo: log in as the seeded admin and call `GET /admin/stats`
+(a clone gets 403). Swagger UI: `http://localhost/docs`.
+
+**Persistence check.** Restart the database and read the data back:
+
+```bash
+docker compose -f infra/docker-compose.yaml restart db
+curl -s http://localhost/profiles/me -H "Authorization: Bearer $TOKEN"   # same profile
+```
+
+Postgres (`postgres_data`), Redis (`redis_data`, AOF on) and MinIO
+(`minio_data`) all use named volumes, so nothing is lost on restart.
+
+### Bottleneck analysis (summary)
+
+Full write-up: [`docs/bottleneck-analysis.md`](docs/bottleneck-analysis.md).
+
+| # | Component / operation | Root cause | Symptom |
+| --- | --- | --- | --- |
+| 1 | Postgres connection pool | Pool size is per *process*; ceiling is `(DB_POOL_SIZE + DB_MAX_OVERFLOW) × processes`, so scaling `api` multiplies DB connections | p95/p99 grow on pool waits, then `too many connections` / 500s |
+| 2 | Redis stream on `POST /memories/write` | `MEMORY_STREAM_MAXLEN` only triggers an async flush, it is not a hard cap; Redis has no `maxmemory` | `used_memory` grows during a burst; OOM would lose unflushed frames |
+| 3 | nginx as the only entry point | One proxy container, no redundancy (SPOF) | 100% errors from outside while every backend is healthy |
+| 4 | `flush_one_stream` | Decodes and re-encodes the whole growing `bytea` under `SELECT ... FOR UPDATE`; cost is O(total buffer), not O(new frames) | Flush time and celery CPU grow each cycle, flushes for one clone serialize, Redis backlog grows |
+| 5 | API worker CPU + per-request auth lookup | JWT check, Postgres user lookup, Pydantic and JSON all run in Python | Throughput plateaus at ~250 RPS from ~10 VUs; p99 climbs to seconds (measured in lab 5) |
+
+Items 1–3 are the pre-scaling analysis; 4 comes from reading the flush code and
+5 was confirmed by the lab 5 measurements.
+
+### Responsibility matrix (RACI)
+
+Full matrix: [`docs/raci-matrix.md`](docs/raci-matrix.md).
+
+| Area | Modules | Owner |
+| --- | --- | --- |
+| Domain, API spec, DB schema and migrations | `shared/db`, `shared/migrations`, `api/schemas.py` | Давид |
+| Auth, RBAC, profiles, admin endpoints | `shared/auth`, `api/deps.py`, `api/routers/{auth,profiles,admin}.py` | Давид |
+| Tests | `tests/` | Давид |
+| Write path, flush, rollup, backups, cache | `shared/streams.py`, `celery_worker/`, `shared/{object_storage,backup_codec,cache}.py`, `api/routers/memories.py` | Нікіта |
+| Containers, compose, nginx, CI | `services/*/Dockerfile*`, `infra/`, `.github/workflows/` | Нікіта |
+| Load testing, docs, diagrams | `tools/`, `load-tests/`, `scripts/`, `README.md`, `docs/` | Нікіта |
 
 ## Lab 2 — Stateless architecture
 
@@ -354,6 +445,19 @@ same client keeps hitting the same node.
 ## Lab 3 — Horizontal scaling and load balancing
 
 ### Topology
+
+```mermaid
+flowchart LR
+    client([Clients]) -->|":80 (only published port)"| nginx["nginx<br/>least_conn, passive health"]
+    subgraph internal["compose network (no host ports)"]
+        nginx --> api1["api #1"]
+        nginx --> api2["api #2"]
+        nginx -.-> slow["api-slow<br/>(experiment only)"]
+        api1 & api2 & slow --> pg[(PostgreSQL)]
+        api1 & api2 & slow --> redis[(Redis)]
+        api1 & api2 & slow --> minio[(MinIO)]
+    end
+```
 
 Clients reach only nginx (`:80`); `api` replicas publish no host ports, so the
 upstream pool is unreachable from outside the compose network. The pool and

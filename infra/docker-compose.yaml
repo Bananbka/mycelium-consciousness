@@ -7,7 +7,7 @@ services:
     ports:
       - "80:80"
     environment:
-      LB_ALGORITHM: "${LB_ALGORITHM-least_conn;}"
+      LB_ALGORITHM: "${LB_ALGORITHM-least_conn;}" # round robin (just empty) | least_conn | ip_hash
       LB_SERVERS: "${LB_SERVERS-server api:8000 max_fails=3 fail_timeout=15s;}"
     volumes:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro

@@ -1,9 +1,3 @@
-// Lab 5 load scenarios (k6). Selected with -e SCENARIO=A|B|C|PREP.
-//   A  read-intensive   GET /memories/backups (cache layer + Postgres read)
-//   B  write-intensive  POST /memories/write   (Redis XADD hot path)
-//   C  complex workflow read profile -> 3 writes -> compute status -> read backups
-// -e RAMP=1 replaces the constant level with one staged ramp-up run.
-// Each run = warm-up phase (untimed) + constant-VU main phase (measured).
 import http from 'k6/http';
 import { check } from 'k6';
 
