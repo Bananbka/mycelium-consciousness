@@ -1,9 +1,16 @@
+name: clone-${APP_ENV:-sandbox}
+
+x-env-file: &env_file
+  - ${ENV_FILE:-.env}
+
 services:
   nginx:
     image: nginx:1.27-alpine
     restart: always
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    networks: [edge]
     ports:
       - "${NGINX_HOST_PORT:-80}:80"
     volumes:
@@ -15,6 +22,7 @@ services:
     restart: always
     depends_on:
       - nginx
+    networks: [edge]
     ports:
       - "${FRONTEND_HOST_PORT:-8080}:80"
 
@@ -22,19 +30,14 @@ services:
     build:
       context: ..
       dockerfile: services/api/src/api/Dockerfile.api
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+      target: runtime
+    env_file: *env_file
     depends_on:
       db:
         condition: service_healthy
     working_dir: /app
+    networks: [backend]
     command:
-      - uv
-      - run
-      - --package
-      - api
-      - --frozen
-      - --no-sync
       - alembic
       - -c
       - shared/alembic.ini
@@ -46,9 +49,9 @@ services:
     build:
       context: ..
       dockerfile: services/api/src/api/Dockerfile.api
+      target: runtime
     restart: always
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+    env_file: *env_file
     depends_on:
       db:
         condition: service_healthy
@@ -58,6 +61,17 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks: [edge, backend]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     ports:
       - "127.0.0.1:${API_HOST_PORT:-18000}:8000"
 
@@ -65,9 +79,10 @@ services:
     build:
       context: ..
       dockerfile: services/celery/src/Dockerfile.celery
+      target: runtime
     restart: always
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+    env_file: *env_file
+    networks: [backend]
     depends_on:
       db:
         condition: service_healthy
@@ -82,9 +97,10 @@ services:
     build:
       context: ..
       dockerfile: services/celery/src/Dockerfile.celery
+      target: runtime
     restart: always
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+    env_file: *env_file
+    networks: [backend]
     depends_on:
       db:
         condition: service_healthy
@@ -93,12 +109,6 @@ services:
       migrate:
         condition: service_completed_successfully
     command:
-      - uv
-      - run
-      - --package
-      - celery-worker
-      - --frozen
-      - --no-sync
       - celery
       - -A
       - celery_worker.app
@@ -108,8 +118,8 @@ services:
   db:
     image: postgres:16-alpine
     restart: always
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+    env_file: *env_file
+    networks: [backend]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
@@ -130,8 +140,8 @@ services:
     image: redis:7-alpine
     restart: always
     command: redis-server --appendonly yes --appendfsync everysec
-    env_file:
-      - .env.${APP_ENV:?select an environment with --env-file infra/.env.<sandbox|production>}
+    env_file: *env_file
+    networks: [backend]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -146,6 +156,7 @@ services:
     image: minio/minio:latest
     restart: always
     command: server /data --console-address ":9001"
+    networks: [backend]
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?}
@@ -161,6 +172,10 @@ services:
       - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-19001}:9001"
     volumes:
       - minio_data:/data
+
+networks:
+  edge:
+  backend:
 
 volumes:
   postgres_data:

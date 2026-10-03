@@ -19,9 +19,8 @@ Run against a **sandbox** stack only — never production (the scenario creates
 accounts):
 
 ```bash
-cp infra/.env.sandbox.example infra/.env.sandbox
-docker compose --env-file infra/.env.sandbox -p clone-sandbox \
-  -f infra/docker-compose.yaml up -d --build
+cp infra/.env.sandbox.example infra/.env
+docker compose -f infra/docker-compose.yaml up -d --build
 
 uv sync --group load
 loadtests/run.sh baseline            # client metrics + docker CPU/RAM

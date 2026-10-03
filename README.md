@@ -134,8 +134,7 @@ Run the stack in one of two environments — see [Environments](#environments).
 Scale the stateless API horizontally:
 
 ```bash
-docker compose --env-file infra/.env.sandbox -p clone-sandbox \
-  -f infra/docker-compose.yaml up --scale api=3
+docker compose -f infra/docker-compose.yaml up -d --scale api=3
 ```
 
 Database migrations:
@@ -169,8 +168,7 @@ After recreating or scaling `api`, reload the gateway so it re-resolves the
 upstream address:
 
 ```bash
-docker compose --env-file infra/.env.sandbox -p clone-sandbox \
-  -f infra/docker-compose.yaml restart nginx
+docker compose -f infra/docker-compose.yaml restart nginx
 ```
 
 ### Load-testing the write path
@@ -220,14 +218,19 @@ The `.env.*` files are gitignored; only the `*.example` templates are tracked.
 ### Run the sandbox
 
 ```bash
-cp infra/.env.sandbox.example infra/.env.sandbox
-docker compose --env-file infra/.env.sandbox -p clone-sandbox   -f infra/docker-compose.yaml up -d --build
-docker compose --env-file infra/.env.sandbox -p clone-sandbox   -f infra/docker-compose.yaml exec api   uv run --package api --frozen --no-sync seed-admin <email> <password>
+cp infra/.env.sandbox.example infra/.env
+docker compose -f infra/docker-compose.yaml up --build
 ```
 
-Reached through nginx on `http://localhost` (`GET /health`), Swagger UI on
-`/docs`. The `migrate` service applies Alembic migrations to completion before
-`api`, `celery-worker` and `celery-beat` start.
+That one command builds the images and starts the whole system. Compose reads
+`infra/.env` for its own interpolation and passes the same file to every
+container. Reached through nginx on `http://localhost` (`GET /health`), Swagger
+UI on `/docs`, the Angular frontend on `http://localhost:8080`. Create the first
+admin once the stack is up:
+
+```bash
+docker compose -f infra/docker-compose.yaml exec api seed-admin <email> <password>
+```
 
 ### Run production
 
@@ -235,13 +238,15 @@ Reached through nginx on `http://localhost` (`GET /health`), Swagger UI on
 cp infra/.env.production.example infra/.env.production
 # replace every CHANGE_ME; generate the JWT key with
 #   python -c "import secrets; print(secrets.token_urlsafe(48))"
-docker compose --env-file infra/.env.production -p clone-production   -f infra/docker-compose.yaml up -d --build
+docker compose --env-file infra/.env.production \
+  -f infra/docker-compose.yaml up -d --build
 ```
 
 Reached on `http://localhost:81` by default (`NGINX_HOST_PORT`). `--env-file`
-feeds compose's own interpolation (ports, database name); the same file is
-passed into each container through `env_file`. After recreating or scaling
-`api`, restart nginx in that project (see "Scale the stateless API" above).
+feeds compose's interpolation; `ENV_FILE=.env.production` inside it names the
+file handed to the containers. The compose project is named after `APP_ENV`
+(`clone-production`), so its volumes and networks are separate from sandbox.
+After recreating or scaling `api`, restart nginx in the same way.
 
 Without the app server: `APP_ENV=sandbox uv run alembic -c shared/alembic.ini
 upgrade head` and `APP_ENV=sandbox uv run --package api api` read the same
@@ -265,6 +270,56 @@ under the same `error_id`, so an operator can find it from a user's report.
 2. `build` (after `quality` passes) — validates the compose file for both
    environments and builds the API and Celery images, so whatever lands on
    `main` is deployable.
+
+## Containerization (Docker)
+
+The whole system runs as a set of containers described by
+[`infra/docker-compose.yaml`](infra/docker-compose.yaml):
+
+| Service | Image | Role | Network(s) | Data |
+| --- | --- | --- | --- | --- |
+| `nginx` | `nginx:1.27-alpine` | API gateway | edge | – |
+| `frontend` | built from `frontend/` (Node → nginx) | Angular UI | edge | – |
+| `api` | built, `Dockerfile.api` | FastAPI | edge, backend | – |
+| `migrate` | same image as `api` | applies Alembic, then exits | backend | – |
+| `celery-worker`, `celery-beat` | built, `Dockerfile.celery` | flush and rollup tasks | backend | – |
+| `db` | `postgres:16-alpine` | Postgres | backend | volume `postgres_data` |
+| `redis` | `redis:7-alpine` | stream buffer, Celery broker | backend | volume `redis_data` (AOF) |
+| `minio` | `minio/minio:latest` | backup archives | backend | volume `minio_data` |
+
+- **Dockerfiles** are multi-stage. `builder` installs the locked dependencies
+  with `uv` into `/app/.venv`; `runtime` (the default target) copies only that
+  venv onto a fresh `python:3.11-slim`, runs as a non-root user and has no `uv`,
+  `pip` build tools or compilers. This cut the images from 828 MB to 609 MB
+  (`api`) and from 710 MB to 523 MB (`celery`). `.dockerignore` keeps `.git`,
+  `.env*`, caches, logs, tests, docs and load-test output out of the build
+  context, so secrets are never baked into a layer.
+- **Persistence.** Postgres, Redis and MinIO write to named volumes, so data
+  survives `docker compose down` and container recreation; only `down -v`
+  deletes it. Verified: a user registered before `down` can still log in after
+  `up`.
+- **Networks.** `edge` carries what the outside world talks to (gateway,
+  frontend) and the API behind it; `backend` holds the stateful services and the
+  workers. Only the API joins both, so the gateway and the frontend cannot
+  resolve or reach Postgres, Redis or MinIO.
+- **Startup order** is `depends_on` with health conditions: the databases
+  report `healthy` (`pg_isready`, `redis-cli ping`, `mc ready`) → `migrate` runs
+  to completion → `api`, `celery-worker`, `celery-beat` start → `api` reports
+  `healthy` (its `/health` runs `SELECT 1`) → `nginx` → `frontend`.
+
+### Development mode (hot reload)
+
+```bash
+docker compose -f infra/docker-compose.yaml -f infra/docker-compose.dev.yaml up --build
+```
+
+The overlay builds the Dockerfile's `dev` stage (editable install) and
+bind-mounts `shared/` and `services/` over `/app`, with `API_RELOAD=true`. Edit
+any Python file on the host and the API restarts within a few seconds, no image
+rebuild. File watching is polled (`WATCHFILES_FORCE_POLLING`) because Docker
+Desktop does not forward change events from Windows/macOS bind mounts. Only the
+API reloads; use `docker compose restart celery-worker` after editing worker
+code. Production refuses `API_RELOAD`, so the overlay is sandbox-only.
 
 ## Users, roles and access control
 
@@ -300,8 +355,10 @@ take effect immediately rather than at token expiry.
 Admins cannot self-register; seed one out of band:
 
 ```bash
-uv run --package api seed-admin ops@example.com <password>
+uv run --package api seed-admin ops@example.com <password>   # from the checkout
 ```
+
+Inside the stack use `docker compose -f infra/docker-compose.yaml exec api seed-admin ...`.
 
 ## Project reports
 

@@ -1,28 +1,79 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1
+#
+# Three stages, one file:
+#   builder  resolves and installs the locked dependencies into /app/.venv
+#   runtime  (default) copies only that venv; no uv, pip tooling or build leftovers
+#   dev      editable install for hot reload; source is bind-mounted over /app
+#            by infra/docker-compose.dev.yaml
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+FROM python:3.11-slim AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
+
+RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY services ./services
 
-# Pull in Debian security fixes newer than the base image (Trivy gates on them).
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# --no-editable bakes the workspace packages (api, shared) into the venv, so the
+# runtime stage does not need their source trees.
+RUN uv sync --package api --frozen --no-dev --no-editable
 
-RUN pip install --no-cache-dir uv \
-    && pip uninstall -y setuptools wheel \
-    && uv sync --package api --frozen --no-dev
+
+FROM python:3.11-slim AS dev
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock ./
+COPY shared ./shared
+COPY services ./services
+
+# Editable: the venv points at /app/shared/src and /app/services/api/src, which
+# the dev compose override replaces with the host checkout.
+RUN uv sync --package api --frozen --no-dev
 
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app
 
 EXPOSE 8000
+CMD ["api"]
 
-CMD ["uv", "run", "--package", "api", "--frozen", "--no-sync", "api"]
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+# Pull in Debian security fixes newer than the base image (Trivy gates on them),
+# and drop packaging tools the app never uses at runtime.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip uninstall -y setuptools wheel
+
+COPY --from=builder /app/.venv /app/.venv
+# Alembic reads its config and revisions from disk; `migrate` runs from this image.
+COPY shared/alembic.ini ./shared/alembic.ini
+COPY shared/migrations ./shared/migrations
+
+RUN useradd --create-home --uid 10001 app && chown -R app:app /app
+USER app
+
+EXPOSE 8000
+CMD ["api"]

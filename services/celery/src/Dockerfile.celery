@@ -1,27 +1,43 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1
+#
+# builder installs the locked dependencies into /app/.venv; runtime copies only
+# that venv, so uv and the build leftovers never reach the final image.
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+FROM python:3.11-slim AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
+
+RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY services ./services
 
-# Pull in Debian security fixes newer than the base image (Trivy gates on them).
+RUN uv sync --package celery-worker --frozen --no-dev --no-editable
+
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+# Pull in Debian security fixes newer than the base image (Trivy gates on them),
+# and drop packaging tools the app never uses at runtime.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && pip uninstall -y setuptools wheel
 
-RUN pip install --no-cache-dir uv \
-    && pip uninstall -y setuptools wheel \
-    && uv sync --package celery-worker --frozen --no-dev
+COPY --from=builder /app/.venv /app/.venv
 
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app
 
-CMD ["uv", "run", "--package", "celery-worker", "--frozen", "--no-sync", \
-     "celery", "-A", "celery_worker.app", "worker", "--loglevel=INFO"]
+CMD ["celery", "-A", "celery_worker.app", "worker", "--loglevel=INFO"]
