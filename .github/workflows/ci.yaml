@@ -37,8 +37,10 @@ jobs:
 
       - name: Validate compose for sandbox and production
         run: |
+          # The job-level APP_ENV=test would override the one in each env file.
           for env in sandbox production; do
-            docker compose --env-file "infra/.env.$env.example" -p "clone-$env" -f infra/docker-compose.yaml config -q
+            cp "infra/.env.$env.example" "infra/.env.$env"
+            APP_ENV="$env" docker compose --env-file "infra/.env.$env" -p "clone-$env" -f infra/docker-compose.yaml config -q
           done
 
   # One independent job per service: build (package) then test. Tests live in
@@ -101,7 +103,7 @@ jobs:
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio server /data
+            minio/minio:latest server /data
           for i in $(seq 1 30); do
             curl -fs http://localhost:9000/minio/health/ready && exit 0
             sleep 1
