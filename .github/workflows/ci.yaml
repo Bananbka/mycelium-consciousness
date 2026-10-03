@@ -5,28 +5,16 @@ on:
     branches: [main]
   pull_request:
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
-# CI always runs as APP_ENV=test: its own throwaway Postgres, Redis and MinIO,
-# never a sandbox or production resource. The values below are CI-only.
+# CI always runs as APP_ENV=test against its own throwaway Postgres, Redis and
+# MinIO, never a sandbox or production resource. Values here are CI-only.
 env:
   APP_ENV: test
-  POSTGRES_HOST: localhost
-  POSTGRES_USER: admin
-  POSTGRES_PASSWORD: ci-only-db-password
-  POSTGRES_DB: clone_memory_ci
-  CELERY_BROKER_URL: redis://localhost:6379/0
-  CELERY_RESULT_BACKEND: redis://localhost:6379/0
-  MINIO_ENDPOINT: http://localhost:9000
-  MINIO_ACCESS_KEY: ci-only-minio-user
-  MINIO_SECRET_KEY: ci-only-minio-secret
-  MINIO_BUCKET: memory-backups-ci-test
-  JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
 
 jobs:
-  quality:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,27 +35,42 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
 
-      - name: Start MinIO
+      - name: Validate compose for sandbox and production
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
-            -e MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
-            minio/minio:latest server /data
-          for _ in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/ready && exit 0
-            sleep 2
+          for env in sandbox production; do
+            docker compose --env-file "infra/.env.$env.example" -p "clone-$env" -f infra/docker-compose.yaml config -q
           done
-          docker logs minio
-          exit 1
 
-      - name: Apply migrations, then verify they match the ORM models
-        run: |
-          uv run alembic -c shared/alembic.ini upgrade head
-          uv run alembic -c shared/alembic.ini check
-
-      - name: Tests
-        run: uv run pytest
-
+  # One independent job per service: build (package) then test. Tests live in
+  # tests/ at the workspace root, so each service runs its own slice of them.
+  build-test:
+    name: build-test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            package: api
+            pytest_args: >-
+              tests
+              --ignore=tests/test_memory_rollup.py
+              --ignore=tests/test_stream_flush.py
+          - service: celery
+            package: celery-worker
+            pytest_args: tests/test_memory_rollup.py tests/test_stream_flush.py
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ci-only-db-password
+      POSTGRES_DB: clone_memory_ci
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+      MINIO_ENDPOINT: http://localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: clone-ci-test
+      JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
     services:
       db:
         image: postgres:16-alpine
@@ -91,24 +94,138 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
-
-  # Continuous delivery gate: both environments' compose files must resolve and
-  # both service images must build, so a merge to main is always deployable.
-  build:
-    needs: quality
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate compose for sandbox and production
+      - name: Start MinIO
         run: |
-          for env in sandbox production; do
-            docker compose --env-file "infra/.env.$env.example" \
-              -p "clone-$env" -f infra/docker-compose.yaml config -q
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio server /data
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:9000/minio/health/ready && exit 0
+            sleep 1
           done
+          docker logs minio
+          exit 1
 
-      - name: Build API image
-        run: docker build -f services/api/src/api/Dockerfile.api -t clone-api:ci .
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      - name: Build Celery image
-        run: docker build -f services/celery/src/Dockerfile.celery -t clone-celery:ci .
+      - name: Install workspace
+        run: uv sync --all-packages --dev --group test --frozen
+
+      - name: Build ${{ matrix.package }} package
+        run: uv build --package ${{ matrix.package }}
+
+      - name: Apply migrations, then verify they match the ORM models
+        run: |
+          uv run alembic -c shared/alembic.ini upgrade head
+          uv run alembic -c shared/alembic.ini check
+
+      - name: Tests
+        run: uv run pytest ${{ matrix.pytest_args }}
+        env:
+          CELERY_BROKER_URL: redis://localhost:6379/0
+          CELERY_RESULT_BACKEND: redis://localhost:6379/0
+          JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
+          MINIO_ENDPOINT: http://localhost:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          MINIO_BUCKET: clone-ci-test
+
+  docker:
+    name: docker (${{ matrix.service }})
+    needs: [lint, build-test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: services/api/src/api/Dockerfile.api
+          - service: celery
+            dockerfile: services/celery/src/Dockerfile.celery
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image name and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.service }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Built into the runner's local daemon only; nothing is published here.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # Runs only for pushes to main, after every image built and passed the scan.
+  # The build reuses the layer cache the docker job just wrote.
+  publish:
+    name: publish (${{ matrix.service }})
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: services/api/src/api/Dockerfile.api
+          - service: celery
+            dockerfile: services/celery/src/Dockerfile.celery
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image name and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.service }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
