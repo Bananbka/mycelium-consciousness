@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# CI always runs as APP_ENV=test against its own throwaway Postgres, Redis and
+# MinIO, never a sandbox or production resource. Values here are CI-only.
+env:
+  APP_ENV: test
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -30,6 +35,14 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
 
+      - name: Validate compose for sandbox and production
+        run: |
+          # The job-level APP_ENV=test would override the one in each env file.
+          for env in sandbox production; do
+            cp "infra/.env.$env.example" "infra/.env.$env"
+            APP_ENV="$env" docker compose --env-file "infra/.env.$env" -p "clone-$env" -f infra/docker-compose.yaml config -q
+          done
+
   # One independent job per service: build (package) then test. Tests live in
   # tests/ at the workspace root, so each service runs its own slice of them.
   build-test:
@@ -51,15 +64,22 @@ jobs:
     env:
       POSTGRES_HOST: localhost
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: secretpassword
-      POSTGRES_DB: clone_memory_db
+      POSTGRES_PASSWORD: ci-only-db-password
+      POSTGRES_DB: clone_memory_ci
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+      MINIO_ENDPOINT: http://localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: clone-ci-test
+      JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
     services:
       db:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: admin
-          POSTGRES_PASSWORD: secretpassword
-          POSTGRES_DB: clone_memory_db
+          POSTGRES_PASSWORD: ci-only-db-password
+          POSTGRES_DB: clone_memory_ci
         ports:
           - 5432:5432
         options: >-
@@ -83,7 +103,7 @@ jobs:
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio server /data
+            bitnamilegacy/minio:latest
           for i in $(seq 1 30); do
             curl -fs http://localhost:9000/minio/health/ready && exit 0
             sleep 1
@@ -110,6 +130,7 @@ jobs:
         run: uv run pytest ${{ matrix.pytest_args }}
         env:
           CELERY_BROKER_URL: redis://localhost:6379/0
+          CELERY_RESULT_BACKEND: redis://localhost:6379/0
           JWT_SECRET_KEY: ci-only-signing-key-not-a-placeholder-0123456789abcdef
           MINIO_ENDPOINT: http://localhost:9000
           MINIO_ACCESS_KEY: minioadmin

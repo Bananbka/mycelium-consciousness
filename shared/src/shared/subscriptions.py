@@ -1,9 +1,10 @@
 import enum
-import os
 from dataclasses import dataclass
 from datetime import timedelta
 
-_INTERVAL_OVERRIDE_SECONDS = os.getenv("ROLLUP_INTERVAL_OVERRIDE_SECONDS")
+from shared.settings import settings
+
+_INTERVAL_OVERRIDE_SECONDS = settings.rollup_interval_override_seconds
 
 
 class SubscriptionTier(enum.StrEnum):
@@ -20,7 +21,7 @@ class BackupPolicy:
     @property
     def interval(self) -> timedelta:
         if _INTERVAL_OVERRIDE_SECONDS is not None:
-            return timedelta(seconds=int(_INTERVAL_OVERRIDE_SECONDS))
+            return timedelta(seconds=_INTERVAL_OVERRIDE_SECONDS)
         return timedelta(days=self.interval_days)
 
 

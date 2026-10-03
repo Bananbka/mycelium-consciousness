@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import datetime
 
@@ -9,10 +8,12 @@ import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "memory-backups")
+from shared.settings import settings
+
+MINIO_ENDPOINT = settings.minio_endpoint
+MINIO_ACCESS_KEY = settings.minio_access_key.get_secret_value()
+MINIO_SECRET_KEY = settings.minio_secret_key.get_secret_value()
+MINIO_BUCKET = settings.minio_bucket
 
 _client = None
 

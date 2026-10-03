@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 
+from shared.settings import settings
+
 logger = logging.getLogger(__name__)
 
 DEV_SECRET = "dev-only-insecure-secret-change-me"
@@ -23,9 +25,9 @@ KNOWN_INSECURE_SECRETS = frozenset(
     }
 )
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", DEV_SECRET)
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "60"))
+JWT_SECRET_KEY = settings.jwt_secret_key.get_secret_value()
+JWT_ALGORITHM = settings.jwt_algorithm
+ACCESS_TOKEN_TTL_MINUTES = settings.access_token_ttl_minutes
 
 
 class InsecureSecretError(RuntimeError):
