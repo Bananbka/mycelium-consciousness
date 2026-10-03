@@ -305,6 +305,8 @@ uv run --package api seed-admin ops@example.com <password>
 
 ## Project reports
 
+- [`docs/load-testing/report.md`](docs/load-testing/report.md) — primary load-test
+  report (Locust, scenario in [`loadtests/`](loadtests/README.md)).
 - [`docs/bottleneck-analysis.md`](docs/bottleneck-analysis.md) — theoretical
   analysis of at least three potential degradation points under high load.
 - [`docs/raci-matrix.md`](docs/raci-matrix.md) — responsibility matrix and
