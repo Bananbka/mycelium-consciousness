@@ -40,7 +40,7 @@ jobs:
           # The job-level APP_ENV=test would override the one in each env file.
           for env in sandbox production; do
             cp "infra/.env.$env.example" "infra/.env.$env"
-            APP_ENV="$env" docker compose --env-file "infra/.env.$env" -p "clone-$env" -f infra/docker-compose.yaml config -q
+            APP_ENV="$env" ENV_FILE=".env.$env" docker compose --env-file "infra/.env.$env" -f infra/docker-compose.yaml config -q
           done
 
   # One independent job per service: build (package) then test. Tests live in

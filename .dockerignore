@@ -18,7 +18,22 @@ htmlcov/
 .vscode/
 .idea/
 
+# Secrets and local config: environment files are injected at run time, never baked in
+.env
+.env.*
+!.env.*.example
+infra/
+
+# Logs and load-test output
+*.log
+logs/
+results/
+
+# Not needed to run the backend
 docs/
-infra/.env
-infra/.env.*
-!infra/.env.*.example
+tests/
+loadtests/
+tools/
+frontend/
+.claude/
+CLAUDE.md

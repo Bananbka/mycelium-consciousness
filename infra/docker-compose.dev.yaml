@@ -1,0 +1,20 @@
+# Development overlay: edit code on the host, the API restarts by itself.
+#
+#   docker compose -f infra/docker-compose.yaml -f infra/docker-compose.dev.yaml up --build
+#
+# Builds the Dockerfile's `dev` stage (editable install) and bind-mounts the
+# source over /app, so no image rebuild is needed for Python changes. Needs
+# APP_ENV=sandbox (production refuses API_RELOAD). Only the API reloads; the
+# Celery worker still needs `docker compose restart celery-worker` after edits.
+services:
+  api:
+    build:
+      target: dev
+    environment:
+      API_RELOAD: "true"
+      # Docker Desktop does not forward file-change events from Windows/macOS
+      # bind mounts to the container, so poll instead.
+      WATCHFILES_FORCE_POLLING: "true"
+    volumes:
+      - ../shared:/app/shared
+      - ../services:/app/services
