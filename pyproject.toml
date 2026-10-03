@@ -20,6 +20,13 @@ test = [
     "pytest-asyncio>=0.24.0",
 ]
 
+# Load testing is run by hand against a deployed sandbox, never in CI.
+load = [
+    "locust>=2.32.0",
+    "matplotlib>=3.9.0",
+    "pandas>=2.2.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
@@ -42,3 +49,5 @@ known-first-party = ["api", "celery_worker", "shared"]
 [tool.ruff.lint.per-file-ignores]
 "shared/migrations/versions/*" = ["E501"]
 "tests/*" = ["ARG001"]
+# Report tables and docstring commands are naturally wide.
+"loadtests/*" = ["E501"]

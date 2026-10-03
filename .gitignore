@@ -28,3 +28,6 @@ htmlcov/
 # Claude Code instructions (never committed; see ~/.claude/CLAUDE.md)
 CLAUDE.md
 .claude/
+
+# Load-test raw output (see loadtests/README.md)
+results/
