@@ -11,6 +11,11 @@ COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY services ./services
 
+# Pull in Debian security fixes newer than the base image (Trivy gates on them).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv \
     && pip uninstall -y setuptools wheel \
     && uv sync --package celery-worker --frozen --no-dev
