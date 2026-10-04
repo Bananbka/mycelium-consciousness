@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  namespace: clone-factory
+  labels:
+    app.kubernetes.io/name: clone-factory
+    app.kubernetes.io/component: celery-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: clone-factory
+      app.kubernetes.io/component: celery-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: clone-factory
+        app.kubernetes.io/component: celery-worker
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-for-migrations
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until psql -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM alembic_version" 2>/dev/null | grep -q '^[1-9]'; do echo waiting for migrations; sleep 3; done
+          envFrom:
+            - configMapRef:
+                name: clone-config
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clone-secret
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: celery-worker
+          image: clone-celery:1.0.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: clone-config
+            - secretRef:
+                name: clone-secret
+          env:
+            # Prefork defaults to one process per node CPU, which blows the
+            # memory limit on a many-core host.
+            - name: CELERY_WORKER_CONCURRENCY
+              value: "2"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # The worker serves no HTTP, so liveness checks that the process is
+          # still the container's main one and the broker answers.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - uv run --package celery-worker --frozen --no-sync celery -A celery_worker.app inspect ping -d "celery@$HOSTNAME"
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 3

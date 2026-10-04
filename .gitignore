@@ -26,3 +26,6 @@ htmlcov/
 # Claude Code instructions (never committed; see ~/.claude/CLAUDE.md)
 CLAUDE.md
 .claude/
+
+
+frontend/*

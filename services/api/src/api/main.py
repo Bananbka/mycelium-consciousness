@@ -10,6 +10,8 @@ from api.routers import admin, auth, home, memories, profiles
 from shared import object_storage
 from shared.db.db import dispose_engine
 
+APP_VERSION = "1.1.0"
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -32,4 +34,4 @@ app.include_router(admin.router)
 async def health_check(db: DatabaseSession):
     result = await db.execute(text("SELECT 1"))
     db_status = "ok" if result.scalar() == 1 else "error"
-    return {"status": "healthy", "database": db_status}
+    return {"status": "healthy", "database": db_status, "version": APP_VERSION}

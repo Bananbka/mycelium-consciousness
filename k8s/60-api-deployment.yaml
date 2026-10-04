@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: clone-factory
+  labels:
+    app.kubernetes.io/name: clone-factory
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: clone-factory
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: clone-factory
+        app.kubernetes.io/component: api
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-for-migrations
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until psql -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM alembic_version" 2>/dev/null | grep -q '^[1-9]'; do echo waiting for migrations; sleep 3; done
+          envFrom:
+            - configMapRef:
+                name: clone-config
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clone-secret
+                  key: POSTGRES_PASSWORD
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: api
+          image: clone-api:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: clone-config
+            - secretRef:
+                name: clone-secret
+          lifecycle:
+            # A terminating pod keeps serving for a few seconds while the
+            # Service and kube-proxy stop routing to it, so no request lands
+            # on a process that has already exited.
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
