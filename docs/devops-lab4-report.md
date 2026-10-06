@@ -110,12 +110,57 @@ Error: … Missing required value: secret.postgresPassword is required …
 
 Те саме для `values-prod.yaml` (з `--set secret.…`): `0 chart(s) failed`.
 
-Порівняння з лабою 3. Лаба 3 дала: 6 Deployment, 1 Job, 4 Service,
-1 Ingress, 3 PVC, ConfigMap і Secret. Чарт у dev-режимі (`helm template`) дає
-ті самі: 6 Deployment (api, celery-beat, celery-worker, minio, postgres,
-redis), Job `migrate-<ревізія>`, 4 Service, 3 PVC, ConfigMap, Secret; Ingress
-з'являється з `api.ingress.enabled=true`, а ще є два об'єкти-хуки (Job
-`preupgrade-check` і Pod `test-api`), яких немає в лабі 3 (див. п. 9).
+Скріншот терміналу: версія Helm, `helm lint` для dev-значень, відмова
+рендерингу prod-значень без пароля (`secret.postgresPassword is required`) і
+перше встановлення релізу `clone-factory` у namespace `clone-dev`:
+
+![helm version, lint, перевірка обов'язкових секретів і install](media/lab4-lint-required-install.png)
+
+### Згенеровані маніфести та порівняння з лабою 3 (п. 7б)
+
+Згенеровані маніфести — це результат підстановки значень у шаблони. Їх дає
+`helm template` (без кластера) або `helm get manifest <реліз>` (те, що
+встановлено); окремим файлом у репозиторії вони не зберігаються:
+
+```
+helm template clone-factory chart/ -n clone-dev -f chart/values-dev.yaml > rendered-dev.yaml
+helm get manifest clone-factory -n clone-dev          # для встановленого релізу
+```
+
+Порівняння з `k8s/` зроблено скриптом
+[`tools/compare_chart_with_lab3.py`](../tools/compare_chart_with_lab3.py): він
+розбирає обидва набори маніфестів, відкидає те, що за задумом відрізняється
+(namespace, мітки, анотації, префікс `clone-factory-` в іменах, номер ревізії
+в імені Job `migrate`), і порівнює решту поле за полем:
+
+```
+> python tools/compare_chart_with_lab3.py rendered-dev.yaml
+lab3 objects (no Namespace): 17   chart objects (no hooks): 16
+only in lab3: [('Ingress', 'api')]
+only in chart: []
+
+Deployment/api            .spec.template.spec.initContainers[0].imagePullPolicy: lab3=None  chart='IfNotPresent'
+Deployment/celery-beat    .spec.template.spec.initContainers[0].imagePullPolicy: lab3=None  chart='IfNotPresent'
+Deployment/celery-worker  .spec.template.spec.initContainers[0].imagePullPolicy: lab3=None  chart='IfNotPresent'
+Deployment/postgres       .spec.template.spec.containers[0].imagePullPolicy:     lab3=None  chart='IfNotPresent'
+Deployment/redis          .spec.template.spec.containers[0].imagePullPolicy:     lab3=None  chart='IfNotPresent'
+Job/migrate               .spec.template.spec.initContainers[0].imagePullPolicy: lab3=None  chart='IfNotPresent'
+Secret/secret   .stringData.JWT_SECRET_KEY / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / POSTGRES_PASSWORD:
+                lab3='lab-…' values   chart='dev-only-…' placeholders
+Service/api     .spec.ports[0].nodePort: lab3=30080  chart=None
+
+identical after normalisation: 8, with differences: 8
+```
+
+Висновок: з 17 об'єктів лаби 3 (без Namespace) чарт у dev-режимі дає 16, а
+`Ingress` з'являється з `api.ingress.enabled=true` (у prod він увімкнений).
+Вісім об'єктів збігаються поле в поле. Решта вісім відрізняються лише трьома
+навмисними речами: `imagePullPolicy` тепер задається явно з `values` для всіх
+контейнерів (у лабі 3 ним керував дефолт Kubernetes), паролі в Secret — це
+dev-заглушки замість лабораторних значень, а `nodePort` не зафіксований
+(`30080` заважав би поставити чарт двічі, тому Kubernetes обирає порт сам).
+Додатково чарт має два об'єкти-хуки (Job `preupgrade-check` і Pod `test-api`),
+яких немає в лабі 3 (див. п. 9); у порівняння вони не входили.
 
 ```
 > helm install clone-factory chart/ -n clone-dev --create-namespace -f chart/values-dev.yaml
@@ -265,8 +310,20 @@ Last Completed: Wed Oct  7 00:07:32 2026
 Phase:          Succeeded
 ```
 
+Скріншот того самого тесту після оновлення (реліз на ревізії 2, `Phase:
+Succeeded`):
+
+![helm test: Phase Succeeded, ревізія 2](media/lab4-helm-test-succeeded.png)
+
+Тест слід запускати, коли всі Deployment уже доступні
+(`kubectl wait --for=condition=Available deploy --all -n clone-dev`). Перший
+запуск, зроблений за 31 секунду після `install`, закінчився `Phase: Failed`
+(`Connection refused`): API ще чекав на міграцію. Повторний запуск пройшов.
+
 (`helm test --logs` у цьому чарті не працює: Pod видаляється одразу після
-успіху, тому логи недоступні; це ціна за відсутність залишків у namespace.)
+успіху, тому логи недоступні; це ціна за відсутність залишків у namespace.
+Невдалий тестовий Pod, навпаки, лишається, і його видаляє наступний `helm test`
+або `kubectl delete pod`.)
 
 Хук блокує погане оновлення. Postgres зупинено, після чого оновлення не
 проходить, а працююча ревізія не змінюється:
