@@ -1,0 +1,36 @@
+{{- $postgres := include "clone-factory.componentName" (dict "ctx" . "component" "postgres") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "preupgrade-check") }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "preupgrade-check") | nindent 4 }}
+  annotations:
+    # Runs before `helm upgrade` touches anything: if the database is not
+    # answering, the upgrade stops here and the running release is unchanged.
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "preupgrade-check") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      containers:
+        - name: check-database
+          image: {{ include "clone-factory.image" (dict "image" .Values.postgres.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - pg_isready -h {{ $postgres }} -p {{ .Values.postgres.service.port }} -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+          resources:
+            {{- toYaml .Values.initContainer.resources | nindent 12 }}

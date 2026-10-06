@@ -1,0 +1,27 @@
+{{ include "clone-factory.fullname" . }} {{ .Chart.Version }} (app {{ .Chart.AppVersion }}) is installed in namespace {{ .Release.Namespace }}.
+
+Watch it come up (the migration Job runs first, then the API and the workers):
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+Open the application:
+{{- $api := include "clone-factory.componentName" (dict "ctx" . "component" "api") }}
+{{- if .Values.api.ingress.enabled }}
+
+  Ingress is enabled. {{ if .Values.api.ingress.host }}Browse to http://{{ .Values.api.ingress.host }}/ (point that name at the ingress address, or run `minikube tunnel`).{{ else }}Browse to the ingress address:
+  kubectl get ingress {{ $api }} -n {{ .Release.Namespace }}{{ end }}
+{{- else if eq .Values.api.service.type "NodePort" }}
+
+  minikube service {{ $api }} -n {{ .Release.Namespace }} --url
+  # keep that terminal open, then in another one:
+  curl <printed url>/health
+{{- else }}
+
+  kubectl port-forward svc/{{ $api }} 8000:{{ .Values.api.service.port }} -n {{ .Release.Namespace }}
+  # in another terminal:
+  curl http://127.0.0.1:8000/health
+{{- end }}
+
+Interactive API docs are served at /docs. Check the release end to end with:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

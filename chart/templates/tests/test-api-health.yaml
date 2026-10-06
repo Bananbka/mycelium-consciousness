@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "test-api") }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "test-api") | nindent 4 }}
+  annotations:
+    # Run with `helm test <release>`: asks the API Service for /health, which
+    # also runs SELECT 1, so a pass means API -> Postgres works end to end.
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  enableServiceLinks: false
+  containers:
+    - name: health
+      image: {{ include "clone-factory.image" (dict "image" .Values.api.image "root" .) }}
+      imagePullPolicy: {{ .Values.imagePullPolicy }}
+      command:
+        - /app/.venv/bin/python
+        - -c
+        - |
+          import json, urllib.request
+          url = "http://{{ include "clone-factory.componentName" (dict "ctx" . "component" "api") }}:{{ .Values.api.service.port }}/health"
+          body = json.load(urllib.request.urlopen(url, timeout=10))
+          assert body["status"] == "healthy" and body["database"] == "ok", body
+          print("api healthy:", body)
+      resources:
+        {{- toYaml .Values.initContainer.resources | nindent 8 }}

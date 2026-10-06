@@ -13,6 +13,9 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
+        # Helm templates contain {{ ... }} and are not valid YAML until rendered;
+        # `helm lint` / `helm template` check them instead.
+        exclude: ^chart/templates/
       - id: end-of-file-fixer
       - id: trailing-whitespace
 

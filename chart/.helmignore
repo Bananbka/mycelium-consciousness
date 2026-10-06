@@ -1,0 +1,13 @@
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# Local overrides that may hold real secrets never belong in a packaged chart.
+values-local*.yaml
+*.secret.yaml

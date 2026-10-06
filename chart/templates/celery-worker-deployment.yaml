@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "celery-worker") }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "celery-worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.celeryWorker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "celery-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "celery-worker") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        {{- include "clone-factory.waitForMigrations" . | nindent 8 }}
+      containers:
+        - name: celery-worker
+          image: {{ include "clone-factory.image" (dict "image" .Values.celeryWorker.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+            - secretRef:
+                name: {{ include "clone-factory.secretName" . }}
+          env:
+            # Prefork defaults to one process per node CPU, which blows the
+            # memory limit on a many-core host.
+            - name: CELERY_WORKER_CONCURRENCY
+              value: {{ .Values.celeryWorker.concurrency | quote }}
+          resources:
+            {{- toYaml .Values.celeryWorker.resources | nindent 12 }}
+          # The worker serves no HTTP, so liveness checks that the process is
+          # still the container's main one and the broker answers.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - uv run --package celery-worker --frozen --no-sync celery -A celery_worker.app inspect ping -d "celery@$HOSTNAME"
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 3

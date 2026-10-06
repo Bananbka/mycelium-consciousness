@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "api") }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "api") | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.api.strategy.maxSurge }}
+      maxUnavailable: {{ .Values.api.strategy.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "api") | nindent 8 }}
+      annotations:
+        # A changed ConfigMap or Secret rolls the pods; envFrom alone would not.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        {{- include "clone-factory.waitForMigrations" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "clone-factory.image" (dict "image" .Values.api.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.API_PORT }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+            - secretRef:
+                name: {{ include "clone-factory.secretName" . }}
+          lifecycle:
+            # A terminating pod keeps serving for a few seconds while the
+            # Service and kube-proxy stop routing to it, so no request lands
+            # on a process that has already exited.
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.api.preStopSleepSeconds | quote }}]
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

@@ -1,0 +1,50 @@
+# Production: more replicas and resources, the newer image tag, Ingress on.
+#
+# No real credentials live in this file. The four secret values are empty on
+# purpose, so `helm install` fails until they are passed on the command line
+# (or an existing Secret is named):
+#   --set secret.postgresPassword=... --set secret.minioAccessKey=... \
+#   --set secret.minioSecretKey=...   --set secret.jwtSecretKey=...
+secret:
+  existingSecret: ""
+  postgresPassword: ""
+  minioAccessKey: ""
+  minioSecretKey: ""
+  jwtSecretKey: ""
+
+api:
+  replicas: 3
+  image:
+    tag: "1.1.0"
+  ingress:
+    enabled: true
+    className: nginx
+    host: clone-factory.example.com
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 768Mi}
+
+celeryWorker:
+  replicas: 2
+  image:
+    tag: "1.1.0"
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 768Mi}
+
+celeryBeat:
+  image:
+    tag: "1.1.0"
+
+# Volume sizes are deliberately not overridden: a PVC cannot be resized in
+# place on most storage classes, so changing them would make an upgrade from
+# the dev values fail. Set postgres.persistence.size / minio.persistence.size
+# with --set on the very first install of a fresh production release.
+postgres:
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+config:
+  LOG_LEVEL: WARNING
+  API_WORKERS: 2

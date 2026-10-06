@@ -1,0 +1,157 @@
+# Default values: the development environment (minikube, local images).
+# values-dev.yaml and values-prod.yaml override only what differs.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullPolicy: IfNotPresent
+
+# Non-secret application settings. Keys are the environment variable names the
+# application reads. Hosts and URLs that point at other components of this
+# release (POSTGRES_HOST, CELERY_BROKER_URL, CELERY_RESULT_BACKEND,
+# MINIO_ENDPOINT) are derived in the ConfigMap template and are not set here.
+config:
+  POSTGRES_USER: admin
+  POSTGRES_DB: clone_memory_db
+  DB_POOL_SIZE: 5
+  DB_MAX_OVERFLOW: 2
+  DB_POOL_RECYCLE: 1800
+  CELERY_TASK_QUEUE: memory_batches
+  ROLLUP_CHECK_INTERVAL_SECONDS: 3600
+  STREAM_FLUSH_INTERVAL_SECONDS: 60
+  MEMORY_STREAM_MAXLEN: 10000
+  MINIO_BUCKET: memory-backups
+  JWT_ALGORITHM: HS256
+  ACCESS_TOKEN_TTL_MINUTES: 60
+  API_HOST: 0.0.0.0
+  API_PORT: 8000
+  API_WORKERS: 1
+  API_RELOAD: false
+  LOG_LEVEL: INFO
+
+# Credentials. The defaults below are throwaway placeholders for a local
+# cluster only; values-prod.yaml leaves them empty on purpose, and the chart
+# refuses to render until they are supplied, e.g.
+#   --set secret.postgresPassword=... --set secret.jwtSecretKey=...
+# Alternatively create the Secret yourself and point existingSecret at it
+# (keys: POSTGRES_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, JWT_SECRET_KEY).
+secret:
+  existingSecret: ""
+  postgresPassword: dev-only-postgres-password
+  minioAccessKey: dev-only-minio-user
+  minioSecretKey: dev-only-minio-password
+  # At least 32 characters, or the API refuses to start.
+  jwtSecretKey: dev-only-jwt-signing-key-not-for-production-0123456789
+
+postgres:
+  replicas: 1
+  image:
+    repository: postgres
+    tag: 16-alpine
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+redis:
+  replicas: 1
+  image:
+    repository: redis
+    tag: 7-alpine
+  service:
+    port: 6379
+  persistence:
+    enabled: true
+    size: 512Mi
+    storageClass: ""
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 256Mi}
+
+minio:
+  replicas: 1
+  # Upstream registries no longer serve minio/minio; a locally tagged copy is
+  # loaded into the cluster with `minikube image load`. Point this at any
+  # S3-compatible image your cluster can pull.
+  image:
+    repository: minio-local
+    tag: lab
+  service:
+    port: 9000
+    consolePort: 9001
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+# Runs `alembic upgrade head`. A new Job (named after the release revision) is
+# created on every install and upgrade.
+migrate:
+  enabled: true
+  backoffLimit: 6
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+
+api:
+  replicas: 2
+  # tag falls back to the chart's appVersion when left empty
+  image:
+    repository: clone-api
+    tag: "1.0.0"
+  strategy:
+    maxSurge: 1
+    maxUnavailable: 0
+  # Seconds a terminating pod keeps serving while the Service stops routing to it.
+  preStopSleepSeconds: 5
+  service:
+    type: NodePort
+    port: 8000
+    # Leave empty to let Kubernetes pick one; a fixed value would stop the
+    # chart from being installed twice in the same cluster.
+    nodePort: ""
+  ingress:
+    enabled: false
+    className: nginx
+    # No host means "match any host", as in the plain manifests.
+    host: ""
+    annotations: {}
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+celeryWorker:
+  replicas: 1
+  image:
+    repository: clone-celery
+    tag: "1.0.0"
+  # Prefork defaults to one process per node CPU, which exceeds the memory
+  # limit on a many-core host.
+  concurrency: 2
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+celeryBeat:
+  # Exactly one scheduler: a second replica would enqueue every task twice.
+  replicas: 1
+  image:
+    repository: clone-celery
+    tag: "1.0.0"
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 200m, memory: 256Mi}
+
+# Small helper containers (wait-for-postgres, wait-for-migrations, hook, test).
+initContainer:
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 100m, memory: 64Mi}

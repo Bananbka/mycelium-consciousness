@@ -1,0 +1,20 @@
+{{- $postgres := include "clone-factory.componentName" (dict "ctx" . "component" "postgres") }}
+{{- $redis := include "clone-factory.componentName" (dict "ctx" . "component" "redis") }}
+{{- $minio := include "clone-factory.componentName" (dict "ctx" . "component" "minio") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clone-factory.configName" . }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "config") | nindent 4 }}
+data:
+  # Derived from this release's own Services, so two releases never talk to
+  # each other's database.
+  POSTGRES_HOST: {{ $postgres | quote }}
+  POSTGRES_PORT: {{ .Values.postgres.service.port | quote }}
+  CELERY_BROKER_URL: {{ printf "redis://%s:%v/0" $redis .Values.redis.service.port | quote }}
+  CELERY_RESULT_BACKEND: {{ printf "redis://%s:%v/0" $redis .Values.redis.service.port | quote }}
+  MINIO_ENDPOINT: {{ printf "http://%s:%v" $minio .Values.minio.service.port | quote }}
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

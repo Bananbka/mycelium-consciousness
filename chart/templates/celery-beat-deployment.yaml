@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "celery-beat") }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "celery-beat") | nindent 4 }}
+spec:
+  # Exactly one scheduler (see celeryBeat.replicas in values.yaml): a second
+  # replica would enqueue every task twice.
+  replicas: {{ .Values.celeryBeat.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "celery-beat") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "celery-beat") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        {{- include "clone-factory.waitForMigrations" . | nindent 8 }}
+      containers:
+        - name: celery-beat
+          image: {{ include "clone-factory.image" (dict "image" .Values.celeryBeat.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command:
+            - uv
+            - run
+            - --package
+            - celery-worker
+            - --frozen
+            - --no-sync
+            - celery
+            - -A
+            - celery_worker.app
+            - beat
+            - --loglevel=INFO
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+            - secretRef:
+                name: {{ include "clone-factory.secretName" . }}
+          resources:
+            {{- toYaml .Values.celeryBeat.resources | nindent 12 }}

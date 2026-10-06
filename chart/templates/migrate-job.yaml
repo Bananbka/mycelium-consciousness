@@ -1,0 +1,57 @@
+{{- if .Values.migrate.enabled }}
+{{- $postgres := include "clone-factory.componentName" (dict "ctx" . "component" "postgres") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Revision in the name: a Job's pod template cannot be changed in place, so
+  # each install and upgrade creates a fresh Job and Helm removes the old one.
+  name: {{ include "clone-factory.componentName" (dict "ctx" . "component" "migrate") }}-{{ .Release.Revision }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "migrate") | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "clone-factory.image" (dict "image" .Values.postgres.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - until pg_isready -h {{ $postgres }} -p {{ .Values.postgres.service.port }} -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do echo waiting for postgres; sleep 2; done
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+          resources:
+            {{- toYaml .Values.initContainer.resources | nindent 12 }}
+      containers:
+        - name: migrate
+          image: {{ include "clone-factory.image" (dict "image" .Values.api.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          workingDir: /app
+          command:
+            - uv
+            - run
+            - --package
+            - api
+            - --frozen
+            - --no-sync
+            - alembic
+            - -c
+            - shared/alembic.ini
+            - upgrade
+            - head
+          envFrom:
+            - configMapRef:
+                name: {{ include "clone-factory.configName" . }}
+            - secretRef:
+                name: {{ include "clone-factory.secretName" . }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+{{- end }}

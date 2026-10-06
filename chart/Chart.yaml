@@ -1,0 +1,16 @@
+apiVersion: v2
+name: clone-factory
+description: Mycelium Consciousness (clone-factory) - API, Celery worker and beat, migration Job, Postgres, Redis and MinIO
+type: application
+# Version of the chart itself: bump it whenever a template or a default in
+# values.yaml changes, even if the application did not.
+version: 0.1.0
+# Version of the application the chart deploys by default. It is the fallback
+# image tag for the API and Celery images (see api.image.tag / celeryWorker.image.tag).
+appVersion: "1.0.0"
+keywords:
+  - fastapi
+  - celery
+  - redis
+  - postgresql
+  - minio

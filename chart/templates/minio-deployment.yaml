@@ -1,0 +1,69 @@
+{{- $name := include "clone-factory.componentName" (dict "ctx" . "component" "minio") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "minio") | nindent 4 }}
+spec:
+  replicas: {{ .Values.minio.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "clone-factory.selectorLabels" (dict "ctx" . "component" "minio") | nindent 8 }}
+    spec:
+      # Without this, Kubernetes injects MINIO_PORT=tcp://... for the minio
+      # Service, and MinIO parses every MINIO_* variable as its own config.
+      enableServiceLinks: false
+      containers:
+        - name: minio
+          image: {{ include "clone-factory.image" (dict "image" .Values.minio.image "root" .) }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: ["server", "/data", "--console-address", ":{{ .Values.minio.service.consolePort }}"]
+          ports:
+            - name: s3
+              containerPort: {{ .Values.minio.service.port }}
+            - name: console
+              containerPort: {{ .Values.minio.service.consolePort }}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "clone-factory.secretName" . }}
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "clone-factory.secretName" . }}
+                  key: MINIO_SECRET_KEY
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.minio.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $name }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

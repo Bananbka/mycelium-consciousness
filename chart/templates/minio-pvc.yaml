@@ -1,0 +1,18 @@
+{{- if .Values.minio.persistence.enabled }}
+{{- $name := include "clone-factory.componentName" (dict "ctx" . "component" "minio") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-data
+  labels:
+    {{- include "clone-factory.labels" (dict "ctx" . "component" "minio") | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.minio.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.minio.persistence.size }}
+{{- end }}
