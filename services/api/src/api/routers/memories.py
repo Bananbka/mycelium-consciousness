@@ -15,8 +15,9 @@ from api.schemas import (
     ResurrectRequest,
 )
 from api.tasks import flush_clone_stream
-from shared import backup_codec, object_storage, streams
+from shared import backup_codec, cache, object_storage, streams
 from shared.db.models import ACTIVE_STATUS, CloneProfile, MemoryBackup
+from shared.settings import settings
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 
@@ -49,14 +50,26 @@ async def list_own_backups(
     profile: OwnProfile,
     db: DatabaseSession,
     limit: int = Query(default=50, ge=1, le=200),
-) -> list[MemoryBackup]:
+) -> list[BackupResponse]:
+    ttl = settings.backups_cache_ttl_seconds
+    key = cache.backups_key(profile.id)
+    if ttl:
+        hit = await cache.get_field(key, str(limit))
+        if hit is not None:
+            return [BackupResponse.model_validate(item) for item in hit]
+
     result = await db.execute(
         select(MemoryBackup)
         .where(MemoryBackup.clone_id == profile.id)
         .order_by(MemoryBackup.period_end.desc())
         .limit(limit)
     )
-    return list(result.scalars().all())
+    backups = [BackupResponse.model_validate(b) for b in result.scalars().all()]
+    if ttl:
+        await cache.set_field(
+            key, str(limit), [b.model_dump(mode="json") for b in backups], ttl
+        )
+    return backups
 
 
 async def _detail_response(backup: MemoryBackup) -> BackupDetailResponse:
@@ -85,6 +98,7 @@ async def restore_own_backup(
     backup.restored_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(backup)
+    await cache.invalidate_backups(backup.clone_id)
     return await _detail_response(backup)
 
 
@@ -147,4 +161,5 @@ async def resurrect_from(
     db.add(resurrected)
     await db.commit()
     await db.refresh(resurrected)
+    await cache.invalidate_backups(profile.id)
     return await _detail_response(resurrected)

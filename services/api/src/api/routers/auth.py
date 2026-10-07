@@ -8,7 +8,12 @@ from sqlalchemy.exc import IntegrityError
 
 from api.deps import CurrentUser, DatabaseSession
 from api.schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse
-from api.security import create_access_token, hash_password, verify_password
+from api.security import (
+    create_access_token,
+    hash_password,
+    hash_password_async,
+    verify_password_async,
+)
 from shared.db.models import CloneProfile, User, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -45,7 +50,7 @@ async def register(payload: RegisterRequest, db: DatabaseSession) -> User:
     """
     user = User(
         email=payload.email.lower(),
-        password_hash=hash_password(payload.password),
+        password_hash=await hash_password_async(payload.password),
         role=UserRole.CLONE,
     )
     user.profile = CloneProfile(designation=payload.designation)
@@ -72,10 +77,10 @@ async def login(payload: LoginRequest, db: DatabaseSession) -> TokenResponse:
     # Same error *and* the same amount of work for an unknown email as for a
     # wrong password, so neither the body nor the timing enumerates accounts.
     if user is None:
-        verify_password(payload.password, _dummy_hash())
+        await verify_password_async(payload.password, _dummy_hash())
         raise INVALID_CREDENTIALS
 
-    if not verify_password(payload.password, user.password_hash):
+    if not await verify_password_async(payload.password, user.password_hash):
         raise INVALID_CREDENTIALS
 
     if not user.is_active:

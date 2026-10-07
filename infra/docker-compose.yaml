@@ -67,6 +67,10 @@ services:
       migrate:
         condition: service_completed_successfully
     networks: [edge, backend]
+    environment:
+      # Redis read-through caches (seconds, 0 = off). See docs/optimization-report.md.
+      AUTH_CACHE_TTL_SECONDS: "${AUTH_CACHE_TTL_SECONDS:-30}"
+      BACKUPS_CACHE_TTL_SECONDS: "${BACKUPS_CACHE_TTL_SECONDS:-30}"
     # Horizontal scaling: N identical replicas behind nginx (`api` resolves to
     # all of them). No host port is published, so clients can only reach the
     # pool through the balancer. Override with API_REPLICAS or `--scale api=N`.

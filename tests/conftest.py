@@ -26,13 +26,17 @@ _TEST_ENV_DEFAULTS = {
     "MINIO_BUCKET": "memory-backups-test",
     # At least 32 bytes, or PyJWT warns the HMAC key is too short for SHA256.
     "JWT_SECRET_KEY": "test-secret-key-for-pytest-only-0123456789",
+    # Caches are opt-in per test (tests/test_cache.py) so the rest of the suite
+    # sees fresh database state on every request.
+    "AUTH_CACHE_TTL_SECONDS": "0",
+    "BACKUPS_CACHE_TTL_SECONDS": "0",
 }
 for _name, _value in _TEST_ENV_DEFAULTS.items():
     os.environ.setdefault(_name, _value)
 
 from api.main import app  # noqa: E402
 from api.security import hash_password  # noqa: E402
-from shared import object_storage, streams  # noqa: E402
+from shared import cache, object_storage, streams  # noqa: E402
 from shared.db.db import get_db  # noqa: E402
 from shared.db.models import Base, CloneProfile, User, UserRole  # noqa: E402
 from shared.settings import settings  # noqa: E402
@@ -163,6 +167,19 @@ async def clean_redis_streams():
 
     async def _clear() -> None:
         async for key in client.scan_iter(match=f"{streams.STREAM_KEY_PREFIX}*"):
+            await client.delete(key)
+
+    await _clear()
+    yield
+    await _clear()
+
+
+@pytest.fixture(autouse=True)
+async def clean_cache_keys():
+    client = streams.get_redis()
+
+    async def _clear() -> None:
+        async for key in client.scan_iter(match=f"{cache.PREFIX}*"):
             await client.delete(key)
 
     await _clear()

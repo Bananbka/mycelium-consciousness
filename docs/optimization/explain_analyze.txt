@@ -1,0 +1,146 @@
+Pager usage is off.
+BEGIN
+INSERT 0 5000
+INSERT 0 5000
+INSERT 0 200000
+ANALYZE
+ANALYZE
+ANALYZE
+
+=== 1a. auth lookup BEFORE: two statements (SELECT users, then SELECT profile; selectinload) ===
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ Index Scan using users_pkey on users (actual time=0.013..0.014 rows=1 loops=1)
+   Index Cond: (id = 651)
+   Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=16
+ Planning Time: 0.191 ms
+ Execution Time: 0.045 ms
+(7 rows)
+
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ Index Scan using uq_clone_profiles_user_id on clone_profiles (actual time=0.012..0.012 rows=1 loops=1)
+   Index Cond: (user_id = 651)
+   Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=14
+ Planning Time: 0.122 ms
+ Execution Time: 0.026 ms
+(7 rows)
+
+
+=== 1b. auth lookup AFTER: one LEFT OUTER JOIN (joinedload) ===
+                                                  QUERY PLAN
+--------------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join (actual time=0.028..0.029 rows=1 loops=1)
+   Buffers: shared hit=6
+   ->  Index Scan using users_pkey on users (actual time=0.013..0.014 rows=1 loops=1)
+         Index Cond: (id = 651)
+         Buffers: shared hit=3
+   ->  Index Scan using uq_clone_profiles_user_id on clone_profiles (actual time=0.012..0.012 rows=1 loops=1)
+         Index Cond: (user_id = 651)
+         Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=34 read=1
+ Planning Time: 0.717 ms
+ Execution Time: 0.071 ms
+(12 rows)
+
+
+=== 2a. GET /memories/backups WITH ix_memory_backups_clone_id_period_end ===
+                                                             QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------
+ Limit (actual time=0.020..0.026 rows=40 loops=1)
+   Buffers: shared hit=5
+   ->  Index Scan Backward using ix_memory_backups_clone_id_period_end on memory_backups (actual time=0.019..0.023 rows=40 loops=1)
+         Index Cond: (clone_id = 651)
+         Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=56
+ Planning Time: 0.508 ms
+ Execution Time: 0.044 ms
+(9 rows)
+
+
+=== 3a. find_due_clones (max(period_end) per clone) WITH the index ===
+                                             QUERY PLAN
+----------------------------------------------------------------------------------------------------
+ Hash Left Join (actual time=45.789..45.791 rows=0 loops=1)
+   Hash Cond: (p.id = lb.clone_id)
+   Filter: (COALESCE(lb.last_end, p.created_at) <= (now() - '30 days'::interval))
+   Rows Removed by Filter: 5650
+   Buffers: shared hit=2328
+   ->  Seq Scan on clone_profiles p (actual time=0.006..0.449 rows=5650 loops=1)
+         Buffers: shared hit=55
+   ->  Hash (actual time=43.911..43.912 rows=5000 loops=1)
+         Buckets: 8192  Batches: 1  Memory Usage: 279kB
+         Buffers: shared hit=2273
+         ->  Subquery Scan on lb (actual time=41.865..43.034 rows=5000 loops=1)
+               Buffers: shared hit=2273
+               ->  HashAggregate (actual time=41.865..42.613 rows=5000 loops=1)
+                     Group Key: memory_backups.clone_id
+                     Batches: 1  Memory Usage: 721kB
+                     Buffers: shared hit=2273
+                     ->  Seq Scan on memory_backups (actual time=0.004..13.937 rows=200000 loops=1)
+                           Buffers: shared hit=2273
+ Planning:
+   Buffers: shared hit=5 read=1
+ Planning Time: 0.225 ms
+ Execution Time: 46.293 ms
+(22 rows)
+
+DROP INDEX
+
+=== 2b. same listing WITHOUT the index ===
+                                            QUERY PLAN
+--------------------------------------------------------------------------------------------------
+ Limit (actual time=16.932..22.009 rows=40 loops=1)
+   Buffers: shared hit=2309 read=1
+   ->  Gather Merge (actual time=16.927..21.998 rows=40 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         Buffers: shared hit=2309 read=1
+         ->  Sort (actual time=9.239..9.243 rows=20 loops=2)
+               Sort Key: period_end DESC
+               Sort Method: quicksort  Memory: 30kB
+               Buffers: shared hit=2309 read=1
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               ->  Parallel Seq Scan on memory_backups (actual time=1.097..8.732 rows=20 loops=2)
+                     Filter: (clone_id = 651)
+                     Rows Removed by Filter: 99980
+                     Buffers: shared hit=2273
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.228 ms
+ Execution Time: 22.654 ms
+(19 rows)
+
+
+=== 3b. find_due_clones WITHOUT the index ===
+                                             QUERY PLAN
+----------------------------------------------------------------------------------------------------
+ Hash Left Join (actual time=52.397..52.399 rows=0 loops=1)
+   Hash Cond: (p.id = lb.clone_id)
+   Filter: (COALESCE(lb.last_end, p.created_at) <= (now() - '30 days'::interval))
+   Rows Removed by Filter: 5650
+   Buffers: shared hit=2328
+   ->  Seq Scan on clone_profiles p (actual time=0.012..0.389 rows=5650 loops=1)
+         Buffers: shared hit=55
+   ->  Hash (actual time=50.545..50.546 rows=5000 loops=1)
+         Buckets: 8192  Batches: 1  Memory Usage: 279kB
+         Buffers: shared hit=2273
+         ->  Subquery Scan on lb (actual time=48.598..49.641 rows=5000 loops=1)
+               Buffers: shared hit=2273
+               ->  HashAggregate (actual time=48.597..49.294 rows=5000 loops=1)
+                     Group Key: memory_backups.clone_id
+                     Batches: 1  Memory Usage: 721kB
+                     Buffers: shared hit=2273
+                     ->  Seq Scan on memory_backups (actual time=0.008..16.296 rows=200000 loops=1)
+                           Buffers: shared hit=2273
+ Planning Time: 0.151 ms
+ Execution Time: 53.004 ms
+(20 rows)
+
+ROLLBACK

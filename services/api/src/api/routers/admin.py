@@ -14,6 +14,7 @@ from api.schemas import (
     UserResponse,
 )
 from api.tasks import force_rollup_clone
+from shared import cache
 from shared.db.models import CloneProfile, MemoryBackup, User
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -55,6 +56,7 @@ async def update_subscription(
     profile.subscription_tier = payload.subscription_tier
     await db.commit()
     await db.refresh(profile)
+    await cache.invalidate_principal(profile.user_id)
     return profile
 
 
@@ -117,6 +119,7 @@ async def deactivate_user(
     user.is_active = False
     await db.commit()
     await db.refresh(user)
+    await cache.invalidate_principal(user.id)
     return user
 
 

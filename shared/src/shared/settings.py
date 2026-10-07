@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     api_workers: int = Field(default=2, ge=1)
     api_reload: bool = False
     log_level: str = "INFO"
+    # Redis read-through caches (seconds; 0 disables). See shared.cache.
+    auth_cache_ttl_seconds: int = Field(default=30, ge=0)
+    backups_cache_ttl_seconds: int = Field(default=30, ge=0)
+    # Argon2 hashes held in flight per API process (each needs ~64 MiB).
+    password_hash_concurrency: int = Field(default=2, ge=1)
     # Reported in the X-Instance-ID response header; empty = container hostname.
     instance_id: str = ""
     # Lab 6 experiment knob: delays every non-health request on this replica.

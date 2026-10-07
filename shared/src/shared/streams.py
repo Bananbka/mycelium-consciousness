@@ -32,8 +32,11 @@ async def append_memory(
 ) -> tuple[str, int]:
     client = get_redis()
     key = stream_key(clone_id)
-    entry_id = await client.xadd(key, {"content": content, "captured_at": captured_at})
-    length = await client.xlen(key)
+    # One round trip instead of two sequential ones (XADD, then XLEN).
+    async with client.pipeline(transaction=False) as pipe:
+        pipe.xadd(key, {"content": content, "captured_at": captured_at})
+        pipe.xlen(key)
+        entry_id, length = await pipe.execute()
     return entry_id, length
 
 

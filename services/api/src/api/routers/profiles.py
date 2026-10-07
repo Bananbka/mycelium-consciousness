@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from api.deps import CurrentUser, DatabaseSession, OwnProfile
 from api.schemas import ProfileResponse, ProfileUpdateRequest
+from shared import cache
 from shared.db.models import CloneProfile, User, UserRole
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -46,6 +47,7 @@ async def _apply_update(
         ) from None
 
     await db.refresh(profile)
+    await cache.invalidate_principal(profile.user_id)
     return profile
 
 
@@ -73,7 +75,9 @@ async def update_own_profile(
     profile: OwnProfile,
     db: DatabaseSession,
 ) -> CloneProfile:
-    return await _apply_update(profile, payload, db)
+    # `profile` may be a cached, session-less copy: write through a fresh row.
+    fresh = await db.get(CloneProfile, profile.id, populate_existing=True)
+    return await _apply_update(fresh, payload, db)
 
 
 @router.get("", response_model=list[ProfileResponse])

@@ -378,8 +378,20 @@ Full report (round robin trace, failover, `least_conn` / weighted / `ip_hash`,
 1 vs 3 replicas under Locust): [`docs/lab6-load-balancing.md`](docs/lab6-load-balancing.md).
 After scaling `api`, `docker compose -f infra/docker-compose.yaml restart nginx`.
 
+## Lab 7 — Performance optimization
+
+Measured with the lab 4 Locust profiles on one `api` replica (before → after):
+`step` RPS 271 → 431 (+59 %), p95 2.7 s → 0.52 s (−81 %), DB CPU 36 → 9 %.
+Changes: argon2 off the event loop, `XADD`+`XLEN` pipelined, one JOIN for the
+auth lookup, and a Redis read-through cache (principal + backup listing, TTL
+`AUTH_CACHE_TTL_SECONDS` / `BACKUPS_CACHE_TTL_SECONDS`, 0 = off, explicit
+invalidation on writes — see `shared/cache.py`). `EXPLAIN ANALYZE` before/after
+and the full comparison: [`docs/optimization-report.md`](docs/optimization-report.md).
+Reproduce with `scripts/run_stage.sh` and `loadtests/compare_stages.py`.
+
 ## Project reports
 
+- [`docs/optimization-report.md`](docs/optimization-report.md) — lab 7 report.
 - [`docs/lab6-load-balancing.md`](docs/lab6-load-balancing.md) — lab 6 report.
 - [`docs/load-testing/report.md`](docs/load-testing/report.md) — primary load-test
   report (Locust, scenario in [`loadtests/`](loadtests/README.md)).
