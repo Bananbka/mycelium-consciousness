@@ -43,6 +43,15 @@ def history(stage: str, profile: str) -> pd.DataFrame:
     df["t"] = df["Timestamp"] - df["Timestamp"].iloc[0]
     for column in ("95%", "50%", "Requests/s", "Failures/s", "User Count"):
         df[column] = pd.to_numeric(df[column], errors="coerce")
+    # Locust's percentile columns in this CSV are cumulative over the whole run,
+    # so they cannot describe "latency at this load step". The average can be
+    # windowed from the cumulative counters: d(avg * count) / d(count).
+    total = df["Total Average Response Time"] * df["Total Request Count"]
+    count = df["Total Request Count"]
+    df["avg_ms_w"] = (
+        total.diff().rolling(30, min_periods=5).sum()
+        / count.diff().rolling(30, min_periods=5).sum()
+    )
     return df
 
 
@@ -95,8 +104,17 @@ def step_table(stage: str) -> pd.DataFrame:
                 {
                     "users": users,
                     "rps": window["Requests/s"].mean(),
-                    "p50": window["50%"].mean(),
-                    "p95": window["95%"].mean(),
+                    "avg": (
+                        (
+                            window["Total Average Response Time"]
+                            * window["Total Request Count"]
+                        ).iloc[-1]
+                        - (
+                            window["Total Average Response Time"]
+                            * window["Total Request Count"]
+                        ).iloc[0]
+                    )
+                    / max(req, 1),
                     "err": 100 * fail / max(req, 1),
                     "api_cpu": api["cpu_percent"].mean(),
                 }
@@ -183,7 +201,7 @@ def step_tables(stages: list[str]) -> str:
     head = "| Users |"
     sep = "| --- |"
     for s in stages:
-        head += f" RPS {label(s)} | p95 ms | err % |"
+        head += f" RPS {label(s)} | avg ms | err % |"
         sep += " --- | --- | --- |"
     lines += [head, sep]
     for users in tables[stages[0]].index:
@@ -192,7 +210,7 @@ def step_tables(stages: list[str]) -> str:
             t = tables[s]
             if users in t.index:
                 r = t.loc[users]
-                row += f" {r['rps']:.0f} | {r['p95']:.0f} | {r['err']:.1f} |"
+                row += f" {r['rps']:.0f} | {r['avg']:.0f} | {r['err']:.1f} |"
             else:
                 row += " – | – | – |"
         lines.append(row)
@@ -204,8 +222,12 @@ def charts(stages: list[str]) -> None:
 
     for metric, ylabel, fname, log in (
         ("Requests/s", "requests / s", "step_throughput.png", False),
-        ("95%", "p95 response time, ms", "step_latency_p95.png", True),
-        ("50%", "p50 response time, ms", "step_latency_p50.png", True),
+        (
+            "avg_ms_w",
+            "average response time, ms (30 s window)",
+            "step_latency_avg.png",
+            True,
+        ),
     ):
         fig, ax = plt.subplots(figsize=(10, 4.5))
         for color, s in zip(COLORS, stages, strict=False):
