@@ -389,8 +389,26 @@ invalidation on writes — see `shared/cache.py`). `EXPLAIN ANALYZE` before/afte
 and the full comparison: [`docs/optimization-report.md`](docs/optimization-report.md).
 Reproduce with `scripts/run_stage.sh` and `loadtests/compare_stages.py`.
 
+## Lab 8 — Stability testing and monitoring
+
+75-minute soak at 70 % of the measured maximum (300 VUsers ≈ 470 RPS, 3 `api`
+replicas): CPU ≤ 42 %, RAM ≤ 51 %, error rate 0.004 %, latency flat. It also
+exposed slow growth of the `memory_buffers` table (flush time and DB size grow
+linearly until the first backup) — see the report. Stress and spike tests find
+the saturation point (~600 RPS, API CPU-bound) and the recovery time (~70 s).
+
+```bash
+# real-time dashboards: Grafana http://localhost:3000, Prometheus :9090
+docker compose -f infra/docker-compose.yaml -f infra/docker-compose.monitoring.yaml up -d
+```
+
+`api` exposes Prometheus metrics on the internal `/metrics` (blocked at nginx).
+Report with graphs and screenshots: [`docs/stability-report.md`](docs/stability-report.md).
+Tooling: `scripts/run_stage.sh`, `loadtests/final_report.py`, `loadtests/prom_export.py`.
+
 ## Project reports
 
+- [`docs/stability-report.md`](docs/stability-report.md) — lab 8 report.
 - [`docs/optimization-report.md`](docs/optimization-report.md) — lab 7 report.
 - [`docs/lab6-load-balancing.md`](docs/lab6-load-balancing.md) — lab 6 report.
 - [`docs/load-testing/report.md`](docs/load-testing/report.md) — primary load-test

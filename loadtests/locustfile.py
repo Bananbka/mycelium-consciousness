@@ -33,38 +33,61 @@ class CloneImplant(HttpUser):
     wait_time = between(0.2, 1.0)
 
     def on_start(self) -> None:
+        self._creds = random.choice(_accounts)
+        if not self._login("POST /auth/login"):
+            self.stop()
+
+    def _login(self, name: str) -> bool:
         with self.client.post(
             "/auth/login",
-            json=random.choice(_accounts),
-            name="POST /auth/login",
+            json=self._creds,
+            name=name,
             catch_response=True,
         ) as response:
             if response.status_code != 200:
                 response.failure(f"login failed: {response.status_code}")
-                self.stop()
-                return
+                return False
             token = response.json()["access_token"]
         self.client.headers["Authorization"] = f"Bearer {token}"
+        return True
+
+    def _api(self, method: str, path: str, name: str, **kwargs) -> None:
+        """Call the API; when the access token has expired, log in again and retry.
+
+        A real client renews its token instead of failing for the rest of the
+        session. The 401 itself is not hidden: the renewal shows up as its own
+        `POST /auth/login (renew)` row, which a soak test needs because every
+        user logged in during the ramp-up and tokens expire together.
+        """
+        with self.client.request(
+            method, path, name=name, catch_response=True, **kwargs
+        ) as response:
+            if response.status_code != 401:
+                return
+            response.success()
+        if self._login("POST /auth/login (renew)"):
+            self.client.request(method, path, name=name, **kwargs)
 
     @task(10)
     def write_memory(self) -> None:
-        self.client.post(
+        self._api(
+            "POST",
             "/memories/write",
+            "POST /memories/write",
             json={"content": _noise()},
-            name="POST /memories/write",
         )
 
     @task(3)
     def read_profile(self) -> None:
-        self.client.get("/profiles/me", name="GET /profiles/me")
+        self._api("GET", "/profiles/me", "GET /profiles/me")
 
     @task(2)
     def list_backups(self) -> None:
-        self.client.get("/memories/backups", name="GET /memories/backups")
+        self._api("GET", "/memories/backups", "GET /memories/backups")
 
     @task(1)
     def stream_status(self) -> None:
-        self.client.get("/memories/stream/status", name="GET /memories/stream/status")
+        self._api("GET", "/memories/stream/status", "GET /memories/stream/status")
 
     @task(1)
     def health(self) -> None:
