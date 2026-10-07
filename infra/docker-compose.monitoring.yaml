@@ -1,0 +1,96 @@
+# Real-time monitoring overlay (lab 8): Prometheus + Grafana.
+#
+#   docker compose -f infra/docker-compose.yaml -f infra/docker-compose.monitoring.yaml up -d
+#
+# Grafana:    http://localhost:3000  (dashboard "Clone Factory - stability", no login for viewers)
+# Prometheus: http://localhost:9090
+#
+# Scraped: every `api` replica (/metrics, found through Docker DNS), nginx
+# (stub_status), Redis, Postgres and container CPU/RAM (stats-exporter).
+x-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: always
+    logging: *default_logging
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    networks: [edge, backend]
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: always
+    logging: *default_logging
+    depends_on: [prometheus]
+    networks: [edge, backend]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/stability.json
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+  # Per-container CPU/RAM. cAdvisor only sees the root cgroup under Docker
+  # Desktop, so this reads the Docker API like `docker stats` does.
+  stats-exporter:
+    image: python:3.13-alpine
+    restart: always
+    logging: *default_logging
+    networks: [backend]
+    environment:
+      COMPOSE_PROJECT: clone-${APP_ENV:-sandbox}
+    command: ["python", "-u", "/exporter.py"]
+    volumes:
+      - ./monitoring/stats_exporter/exporter.py:/exporter.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4
+    restart: always
+    logging: *default_logging
+    depends_on: [nginx]
+    networks: [edge]
+    command:
+      - --nginx.scrape-uri=http://nginx:8081/stub_status
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.74.0
+    restart: always
+    logging: *default_logging
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [backend]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    restart: always
+    logging: *default_logging
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+
+volumes:
+  prometheus_data:
+  grafana_data:

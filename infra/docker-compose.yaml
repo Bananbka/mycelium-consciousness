@@ -3,8 +3,16 @@ name: clone-${APP_ENV:-sandbox}
 x-env-file: &env_file
   - ${ENV_FILE:-.env}
 
+# Container logs are the one thing that grows without bound during a soak test.
+x-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   nginx:
+    logging: *default_logging
     image: nginx:1.27-alpine
     restart: always
     depends_on:
@@ -22,6 +30,7 @@ services:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
 
   frontend:
+    logging: *default_logging
     build:
       context: ../frontend
     restart: always
@@ -32,6 +41,7 @@ services:
       - "${FRONTEND_HOST_PORT:-8080}:80"
 
   migrate:
+    logging: *default_logging
     build:
       context: ..
       dockerfile: services/api/src/api/Dockerfile.api
@@ -51,6 +61,7 @@ services:
     restart: "no"
 
   api:
+    logging: *default_logging
     build:
       context: ..
       dockerfile: services/api/src/api/Dockerfile.api
@@ -71,6 +82,8 @@ services:
       # Redis read-through caches (seconds, 0 = off). See docs/optimization-report.md.
       AUTH_CACHE_TTL_SECONDS: "${AUTH_CACHE_TTL_SECONDS:-30}"
       BACKUPS_CACHE_TTL_SECONDS: "${BACKUPS_CACHE_TTL_SECONDS:-30}"
+      # Per-process metric files merged by /metrics (api/metrics.py).
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
     # Horizontal scaling: N identical replicas behind nginx (`api` resolves to
     # all of them). No host port is published, so clients can only reach the
     # pool through the balancer. Override with API_REPLICAS or `--scale api=N`.
@@ -90,6 +103,7 @@ services:
   # Lab 6 experiment: same image as `api`, artificially slow. Only started with
   # `--profile slow`; nginx routes to it only if LB_SERVERS names it.
   api-slow:
+    logging: *default_logging
     extends:
       service: api
     profiles: ["slow"]
@@ -99,6 +113,7 @@ services:
       SIMULATED_LATENCY_MS: "${SLOW_LATENCY_MS:-300}"
 
   celery-worker:
+    logging: *default_logging
     build:
       context: ..
       dockerfile: services/celery/src/Dockerfile.celery
@@ -117,6 +132,7 @@ services:
         condition: service_completed_successfully
 
   celery-beat:
+    logging: *default_logging
     build:
       context: ..
       dockerfile: services/celery/src/Dockerfile.celery
@@ -139,6 +155,7 @@ services:
       - --loglevel=INFO
 
   db:
+    logging: *default_logging
     image: postgres:16-alpine
     restart: always
     env_file: *env_file
@@ -160,6 +177,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   redis:
+    logging: *default_logging
     image: redis:7-alpine
     restart: always
     command: redis-server --appendonly yes --appendfsync everysec
@@ -176,6 +194,7 @@ services:
       - redis_data:/data
 
   minio:
+    logging: *default_logging
     image: minio/minio:latest
     restart: always
     command: server /data --console-address ":9001"

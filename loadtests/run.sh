@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run one named profile against a deployed sandbox and collect client + server metrics.
-#   loadtests/run.sh baseline|step|lb [host] [compose-project]
+#   loadtests/run.sh baseline|step|lb|stress|spike|soak [host] [compose-project]
 set -euo pipefail
 
-PROFILE="${1:?profile: baseline|step|lb}"
+PROFILE="${1:?profile: baseline|step|lb|stress|spike|soak}"
 HOST="${2:-http://localhost:8088}"
 PROJECT="${3:-clone-sandbox}"
 OUT="results/${PROFILE}"

@@ -18,8 +18,21 @@ upstream api_pool {
     keepalive_timeout 60s;
 }
 
+# Internal only (not published): scraped by nginx-prometheus-exporter.
+server {
+    listen 8081;
+    location = /stub_status {
+        stub_status;
+    }
+}
+
 server {
     listen 80;
+
+    # Prometheus scrapes the replicas directly on the internal network.
+    location = /metrics {
+        return 404;
+    }
 
     location / {
         proxy_pass http://api_pool;

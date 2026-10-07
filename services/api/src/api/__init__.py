@@ -3,11 +3,13 @@ from pathlib import Path
 import uvicorn
 
 import shared
+from api.metrics import reset_multiprocess_dir
 from shared.settings import settings
 
 
 def main() -> None:
     reload = settings.api_reload
+    reset_multiprocess_dir()
     uvicorn.run(
         "api.main:app",
         host=settings.api_host,

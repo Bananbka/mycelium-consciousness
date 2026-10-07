@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from api import metrics
 from api.config import validate_jwt_secret
 from api.deps import DatabaseSession
 from api.routers import admin, auth, home, memories, profiles
@@ -75,6 +76,14 @@ async def add_instance_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Instance-ID"] = INSTANCE_ID
     return response
+
+
+app.middleware("http")(metrics.observe)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    return metrics.render()
 
 
 app.include_router(auth.router)
