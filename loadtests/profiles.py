@@ -31,6 +31,8 @@ def _step(start: int, stop: int, step: int, hold: int, ramp: int) -> Profile:
 PROFILES: dict[str, Profile] = {
     # 50 users, 30 s ramp-up, 3 minutes in total.
     "baseline": Profile(((30, 50, 50 / 30), (180, 50, 1))),
+    # Lab 6: short run for comparing replica counts behind the balancer.
+    "lb": Profile(((10, 100, 10), (70, 100, 1))),
     # 50 -> 600 users, +50 every 45 s (about 9 minutes), 10 users/s.
     "step": _step(start=50, stop=600, step=50, hold=45, ramp=10),
 }

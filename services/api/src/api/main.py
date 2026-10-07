@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +17,9 @@ from shared.db.db import dispose_engine
 from shared.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Which replica answered; the load balancer demo and tests rely on it.
+INSTANCE_ID = settings.instance_id or socket.gethostname()
 
 
 @asynccontextmanager
@@ -63,6 +68,15 @@ if not settings.debug:
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
+@app.middleware("http")
+async def add_instance_id(request: Request, call_next):
+    if settings.simulated_latency_ms and request.url.path != "/health":
+        await asyncio.sleep(settings.simulated_latency_ms / 1000)
+    response = await call_next(request)
+    response.headers["X-Instance-ID"] = INSTANCE_ID
+    return response
+
+
 app.include_router(auth.router)
 app.include_router(home.router)
 app.include_router(profiles.router)
@@ -74,4 +88,4 @@ app.include_router(admin.router)
 async def health_check(db: DatabaseSession):
     result = await db.execute(text("SELECT 1"))
     db_status = "ok" if result.scalar() == 1 else "error"
-    return {"status": "healthy", "database": db_status}
+    return {"status": "healthy", "database": db_status, "instance": INSTANCE_ID}

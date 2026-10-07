@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     api_workers: int = Field(default=2, ge=1)
     api_reload: bool = False
     log_level: str = "INFO"
+    # Reported in the X-Instance-ID response header; empty = container hostname.
+    instance_id: str = ""
+    # Lab 6 experiment knob: delays every non-health request on this replica.
+    simulated_latency_ms: int = Field(default=0, ge=0)
 
     @property
     def is_production(self) -> bool:

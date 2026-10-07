@@ -280,7 +280,7 @@ The whole system runs as a set of containers described by
 | --- | --- | --- | --- | --- |
 | `nginx` | `nginx:1.27-alpine` | API gateway | edge | – |
 | `frontend` | built from `frontend/` (Node → nginx) | Angular UI | edge | – |
-| `api` | built, `Dockerfile.api` | FastAPI | edge, backend | – |
+| `api` (×`API_REPLICAS`) | built, `Dockerfile.api` | FastAPI replicas, no host port | edge, backend | – |
 | `migrate` | same image as `api` | applies Alembic, then exits | backend | – |
 | `celery-worker`, `celery-beat` | built, `Dockerfile.celery` | flush and rollup tasks | backend | – |
 | `db` | `postgres:16-alpine` | Postgres | backend | volume `postgres_data` |
@@ -360,8 +360,27 @@ uv run --package api seed-admin ops@example.com <password>   # from the checkout
 
 Inside the stack use `docker compose -f infra/docker-compose.yaml exec api seed-admin ...`.
 
+## Lab 6 — Load balancing with nginx
+
+`api` runs as `API_REPLICAS` (default 3) identical replicas behind nginx, which
+is configured from `LB_ALGORITHM` / `LB_SERVERS` through
+`infra/nginx/default.conf.template` (default: round robin, passive health
+checks with retry). Every response carries `X-Instance-ID`; nginx adds
+`X-Upstream-Addr`.
+
+```bash
+docker compose -f infra/docker-compose.yaml up -d --build          # 3 replicas
+for i in $(seq 1 12); do curl -sI localhost/health | grep -i x-instance-id; done
+scripts/lb_experiments.sh distribution|failover|algorithms|compare|scaleout|failover-load
+```
+
+Full report (round robin trace, failover, `least_conn` / weighted / `ip_hash`,
+1 vs 3 replicas under Locust): [`docs/lab6-load-balancing.md`](docs/lab6-load-balancing.md).
+After scaling `api`, `docker compose -f infra/docker-compose.yaml restart nginx`.
+
 ## Project reports
 
+- [`docs/lab6-load-balancing.md`](docs/lab6-load-balancing.md) — lab 6 report.
 - [`docs/load-testing/report.md`](docs/load-testing/report.md) — primary load-test
   report (Locust, scenario in [`loadtests/`](loadtests/README.md)).
 - [`docs/bottleneck-analysis.md`](docs/bottleneck-analysis.md) — theoretical

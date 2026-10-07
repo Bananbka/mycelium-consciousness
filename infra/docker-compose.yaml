@@ -13,8 +13,13 @@ services:
     networks: [edge]
     ports:
       - "${NGINX_HOST_PORT:-80}:80"
+    environment:
+      # Empty LB_ALGORITHM = round robin. Others: "least_conn;", "ip_hash;".
+      # Weights go on the LB_SERVERS line, e.g. "server api:8000 weight=3;".
+      LB_ALGORITHM: "${LB_ALGORITHM-}"
+      LB_SERVERS: "${LB_SERVERS-server api:8000 max_fails=2 fail_timeout=10s;}"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
 
   frontend:
     build:
@@ -62,6 +67,11 @@ services:
       migrate:
         condition: service_completed_successfully
     networks: [edge, backend]
+    # Horizontal scaling: N identical replicas behind nginx (`api` resolves to
+    # all of them). No host port is published, so clients can only reach the
+    # pool through the balancer. Override with API_REPLICAS or `--scale api=N`.
+    deploy:
+      replicas: ${API_REPLICAS:-3}
     healthcheck:
       test:
         - CMD
@@ -72,8 +82,17 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    ports:
-      - "127.0.0.1:${API_HOST_PORT:-18000}:8000"
+
+  # Lab 6 experiment: same image as `api`, artificially slow. Only started with
+  # `--profile slow`; nginx routes to it only if LB_SERVERS names it.
+  api-slow:
+    extends:
+      service: api
+    profiles: ["slow"]
+    deploy:
+      replicas: 1
+    environment:
+      SIMULATED_LATENCY_MS: "${SLOW_LATENCY_MS:-300}"
 
   celery-worker:
     build:
