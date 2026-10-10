@@ -6,7 +6,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 
-from api.deps import DatabaseSession, OwnBackup, OwnProfile
+from api.deps import DatabaseSession, OwnBackup, OwnProfile, ReadDatabaseSession
 from api.schemas import (
     BackupDetailResponse,
     BackupResponse,
@@ -47,7 +47,7 @@ async def stream_status(profile: OwnProfile) -> dict[str, int]:
 @router.get("/backups", response_model=list[BackupResponse])
 async def list_own_backups(
     profile: OwnProfile,
-    db: DatabaseSession,
+    db: ReadDatabaseSession,
     response: Response,
     limit: int = Query(default=50, ge=1, le=200),
     cache_control: str | None = Header(default=None),

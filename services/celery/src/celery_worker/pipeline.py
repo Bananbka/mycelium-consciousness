@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared import cache, object_storage
+from shared import cache, consistency, object_storage
 from shared.db import CloneProfile, MemoryBackup, MemoryBuffer
 from shared.subscriptions import BACKUP_POLICIES
 
@@ -117,6 +117,10 @@ async def rollup_clone(
     pruned = await _prune_stale_backups(session, clone)
     await session.commit()
     await cache.invalidate_backups(clone.id)
+    # The owner did not make this write, so their own read-after-write window is
+    # not open; without this the next listing could be re-cached from a standby
+    # that has not replayed the new backup row yet.
+    await consistency.mark_clone_write(clone.id)
 
     logger.info(
         "rolled up clone_id=%d entries=%d pruned=%d",

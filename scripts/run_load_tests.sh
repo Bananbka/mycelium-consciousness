@@ -2,11 +2,14 @@
 export MSYS_NO_PATHCONV=1
 set -euo pipefail
 cd "$(dirname "$0")/.."
-C="docker compose -f infra/docker-compose.yaml"
-set -a; . infra/.env; set +a
+C="${COMPOSE:-docker compose -f infra/docker-compose.yaml}"
+NET="${NETWORK:-infra_default}"
+set -a; . <(sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r$//' "${ENV_FILE:-infra/.env}"); set +a  # tolerate BOM/CRLF
 DURATION="${DURATION:-30s}"
 
 psql_() { $C exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"; }
+rpsql_() { $C exec -T db-replica psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"; }
+replica_rows_read() { rpsql_ "SELECT tup_returned+tup_fetched FROM pg_stat_database WHERE datname='$POSTGRES_DB'" 2>/dev/null || echo 0; }
 rows_read() { psql_ "SELECT tup_returned+tup_fetched FROM pg_stat_database WHERE datname='$POSTGRES_DB'"; }
 backups_rows() { psql_ "SELECT seq_tup_read+COALESCE(idx_tup_fetch,0) FROM pg_stat_user_tables WHERE relname='memory_backups'"; }
 scale() {
@@ -16,9 +19,9 @@ scale() {
 k6run() { # name scenario vus [extra -e args]
   local name="$1" scen="$2" vus="$3"; shift 3
   echo ">>> $name (scenario $scen, $vus VUs, ${DURATION})"
-  local before after bbefore bafter; before=$(rows_read); bbefore=$(backups_rows)
+  local before after bbefore bafter rbefore; before=$(rows_read); bbefore=$(backups_rows); rbefore=$(replica_rows_read)
   ( sleep 25; docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}'       > "load-tests/results/$name.stats" 2>/dev/null ) &
-  docker run --rm -i --cpus=2 --network infra_default \
+  docker run --rm -i --cpus=2 --network "$NET" \
     -v "$PWD/load-tests:/lt" grafana/k6:latest run --quiet \
     -e SCENARIO="$scen" -e VUS="$vus" -e DURATION="$DURATION" "$@" \
     --summary-export="/lt/results/$name.json" /lt/mycelium.js >/dev/null 2>"load-tests/results/$name.err" || true
@@ -26,10 +29,11 @@ k6run() { # name scenario vus [extra -e args]
   python load-tests/scrub.py "load-tests/results/$name.json"  # drop auth tokens from the export
   sleep 2  # let pg_stat_* flush
   after=$(rows_read); echo "$((after-before))" > "load-tests/results/$name.dbrows"
+  echo "$(( $(replica_rows_read) - rbefore ))" > "load-tests/results/$name.replicarows"
   bafter=$(backups_rows); echo "$((bafter-bbefore))" > "load-tests/results/$name.backupsrows"
 }
 
-case "${1:?matrix|scaling|cache|prep}" in
+case "${1:?matrix|scaling|cache|replica|prep}" in
 prep)
   scale 2
   k6run prep PREP 1
@@ -58,6 +62,17 @@ scaling)  # 1 vs 3 instances (2 comes from the matrix), 100 VUs
   for n in 1 3; do scale "$n"
     for scen in A B; do k6run "scale${n}_${scen}_100" "$scen" 100; done
   done ;;
+replica)  # lab 6: read scaling, scenario A with the cache bypassed so every read reaches Postgres.
+          # "single" = POSTGRES_REPLICA_HOST empty (all traffic on the primary); "replica" = split.
+  for cfg in single replica; do
+    host=""; [ "$cfg" = replica ] && host="db-replica"
+    POSTGRES_REPLICA_HOST="$host" $C up -d --no-deps --scale api=2 api >/dev/null 2>&1; sleep 8
+    $C restart nginx >/dev/null 2>&1; sleep 4
+    for vus in ${LEVELS:-10 50 100 200}; do
+      k6run "l6_${cfg}_A_${vus}" A "$vus" -e NOCACHE=1
+    done
+  done
+  POSTGRES_REPLICA_HOST="db-replica" $C up -d --no-deps --scale api=2 api >/dev/null 2>&1 ;;
 cache)    # scenario A with the cache bypassed, 100 VUs, 2 instances
   scale 2; k6run "nocache_A_100" A 100 -e NOCACHE=1 ;;
 esac

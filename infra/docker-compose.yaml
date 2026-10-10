@@ -43,6 +43,9 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      # Lab 6: lag-tolerant reads go to the standby; empty = single node.
+      POSTGRES_REPLICA_HOST: "${POSTGRES_REPLICA_HOST-db-replica}"
     depends_on:
       db:
         condition: service_healthy
@@ -65,6 +68,7 @@ services:
       - .env
     environment:
       SIMULATED_LATENCY_MS: "${SLOW_LATENCY_MS:-300}"
+      POSTGRES_REPLICA_HOST: "${POSTGRES_REPLICA_HOST-db-replica}"
     depends_on:
       db:
         condition: service_healthy
@@ -129,6 +133,21 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
       POSTGRES_DB: ${POSTGRES_DB:-clone_memory_db}
+    # Lab 6: the primary ships its WAL. wal_level=replica is what a physical
+    # standby needs; max_slot_wal_keep_size caps how much WAL a stopped standby
+    # may pin on the primary's disk.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_slot_wal_keep_size=1GB
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     healthcheck:
       test:
         ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-clone_memory_db}"]
@@ -140,6 +159,66 @@ services:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+
+  # Lab 6: idempotent one-shot - creates the replication role and slot on the
+  # primary. Done here (not in /docker-entrypoint-initdb.d) so it also works on
+  # a data volume that already exists.
+  replication-setup:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-admin}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+      PGDATABASE: ${POSTGRES_DB:-clone_memory_db}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicatorpass}
+      REPLICATION_SLOT: ${REPLICATION_SLOT:-replica1}
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 \
+          -v ruser="$$REPLICATION_USER" -v rpass="$$REPLICATION_PASSWORD" \
+          -v slot="$$REPLICATION_SLOT" <<'SQL'
+        SELECT format('CREATE ROLE %I WITH REPLICATION LOGIN PASSWORD %L', :'ruser', :'rpass')
+        WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'ruser')
+        \gexec
+        SELECT pg_create_physical_replication_slot(:'slot')
+        WHERE NOT EXISTS (SELECT FROM pg_replication_slots WHERE slot_name = :'slot');
+        SQL
+
+  # Lab 6: read replica (hot standby). Same image, started by a script that
+  # clones the primary on first boot. Nothing writes to it; the API reads from
+  # it for lag-tolerant GETs and falls back to the primary if it is down.
+  db-replica:
+    image: postgres:16-alpine
+    container_name: clone_postgres_replica
+    restart: always
+    environment:
+      PRIMARY_HOST: db
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicatorpass}
+      REPLICATION_SLOT: ${REPLICATION_SLOT:-replica1}
+    entrypoint: ["/bin/sh", "/replica-entrypoint.sh"]
+    depends_on:
+      replication-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-clone_memory_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    ports:
+      - "127.0.0.1:${POSTGRES_REPLICA_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
 
   redis:
     image: redis:7-alpine
@@ -181,5 +260,6 @@ services:
 
 volumes:
   postgres_data:
+  postgres_replica_data:
   redis_data:
   minio_data:

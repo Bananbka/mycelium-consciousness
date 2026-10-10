@@ -7,12 +7,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from api.config import validate_jwt_secret
-from api.deps import DatabaseSession
+from api.deps import SAFE_METHODS, DatabaseSession
 from api.routers import admin, auth, home, memories, profiles
-from shared import object_storage, streams
-from shared.db.db import dispose_engine
+from shared import consistency, object_storage, streams
+from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal, dispose_engine
 
 
 @asynccontextmanager
@@ -39,6 +40,43 @@ async def add_instance_id(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def read_after_write(request: Request, call_next):
+    """Open the writer's read-after-write window and label the serving node.
+
+    ``request.state`` is shared with the route via the ASGI scope, so the
+    dependencies in ``api.deps`` can tell this middleware who wrote and which
+    node answered. The flag is set *before* the response is returned, so a
+    client that fires its next read immediately cannot overtake it.
+    """
+    response = await call_next(request)
+    user_id = getattr(request.state, "user_id", None)
+    if (
+        REPLICA_ENABLED
+        and user_id is not None
+        and request.method not in SAFE_METHODS
+        and response.status_code < 400
+    ):
+        await consistency.mark_user_write(user_id)
+    if node := getattr(request.state, "db_node", None):
+        response.headers["X-DB-Node"] = node
+    return response
+
+
+@app.exception_handler(ConnectionError)
+@app.exception_handler(socket.gaierror)
+@app.exception_handler(TimeoutError)
+@app.exception_handler(OperationalError)
+@app.exception_handler(InterfaceError)
+async def database_unavailable(_request: Request, _exc: Exception) -> JSONResponse:
+    """A node needed by this request is down: say so (503), do not 500."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database unavailable"},
+        headers={"Retry-After": "5"},
+    )
+
+
 app.include_router(auth.router)
 app.include_router(home.router)
 app.include_router(profiles.router)
@@ -58,6 +96,11 @@ async def _probe_db(db) -> None:
     await db.execute(text("SELECT 1"))
 
 
+async def _probe_replica() -> None:
+    async with ReplicaSessionLocal() as session:
+        await session.execute(text("SELECT 1"))
+
+
 async def _probe_redis() -> None:
     await streams.get_redis().ping()
 
@@ -74,11 +117,16 @@ async def health_check(db: DatabaseSession):
         "object_storage": await _check(_probe_minio),
     }
     healthy = all(v == "ok" for v in checks.values())
+    # Informational: a down standby degrades read capacity, not availability
+    # (reads fall back to the primary), so it must not pull the node out of
+    # the load balancer.
+    replica = await _check(_probe_replica) if REPLICA_ENABLED else "disabled"
     return JSONResponse(
         status_code=200 if healthy else 503,
         content={
             "status": "healthy" if healthy else "degraded",
             **checks,
+            "replica": replica,
             "instance": INSTANCE_ID,
         },
     )

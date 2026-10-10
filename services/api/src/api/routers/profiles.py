@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from api.deps import CurrentUser, DatabaseSession, OwnProfile
+from api.deps import CurrentUser, DatabaseSession, OwnProfile, ReadDatabaseSession
 from api.schemas import ProfileResponse, ProfileUpdateRequest
 from shared.db.models import CloneProfile, User, UserRole
 
@@ -77,7 +77,9 @@ async def update_own_profile(
 
 
 @router.get("", response_model=list[ProfileResponse])
-async def list_profiles(user: CurrentUser, db: DatabaseSession) -> list[CloneProfile]:
+async def list_profiles(
+    user: CurrentUser, db: ReadDatabaseSession
+) -> list[CloneProfile]:
     query = select(CloneProfile).order_by(CloneProfile.id)
     if user.role is not UserRole.ADMIN:
         query = query.where(CloneProfile.user_id == user.id)
@@ -90,7 +92,7 @@ async def list_profiles(user: CurrentUser, db: DatabaseSession) -> list[ClonePro
 async def read_profile(
     profile_id: int,
     user: CurrentUser,
-    db: DatabaseSession,
+    db: ReadDatabaseSession,
 ) -> CloneProfile:
     return await _load_accessible(profile_id, user, db)
 

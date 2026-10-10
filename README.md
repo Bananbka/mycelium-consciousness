@@ -18,6 +18,7 @@ and restore.
 | 3 | Horizontal scaling, load balancing | [Lab 3](#lab-3--horizontal-scaling-and-load-balancing) |
 | 4 | Distributed caching | [Lab 4](#lab-4--distributed-caching-cache-aside) |
 | 5 | Load testing, performance baseline | [Lab 5](#lab-5--load-testing-and-performance-baseline) |
+| 6 | Database replication, read/write separation | [Lab 6](#lab-6--database-replication-and-readwrite-separation) |
 
 ## Architecture
 
@@ -830,3 +831,185 @@ Primary Bottleneck: API worker CPU (~220% per api container vs Postgres 45%)
   warm-up phase is discarded.
 - **Isolation.** Generator and SUT share one host; `--cpus=2` bounds the
   generator, but a real baseline needs a separate machine.
+
+## Lab 6 — Database replication and read/write separation
+
+Lab 5 showed one Postgres serving every statement. Lab 6 adds a **streaming
+replica** and splits traffic: writes (and anything that must be exact) go to
+the primary, lag-tolerant reads go to the replica, with a mechanism that keeps
+a client from seeing its own write disappear.
+
+### Topology
+
+```mermaid
+flowchart LR
+    client([Clients]) --> nginx
+    nginx --> api1["api #1"] & api2["api #2"]
+    subgraph db["PostgreSQL"]
+        primary[("primary<br/>read + write")]
+        replica[("replica (hot standby)<br/>read-only")]
+        primary == "WAL stream (async, slot replica1)" ==> replica
+    end
+    api1 & api2 -- "writes, auth, strong reads" --> primary
+    api1 & api2 -. "lag-tolerant GETs" .-> replica
+    api1 & api2 -- "read-after-write flag" --> redis[(Redis)]
+    celery["celery worker / beat"] -- "flush, rollup" --> primary
+```
+
+What changed relative to lab 5:
+
+| Area | Lab 5 | Lab 6 |
+| --- | --- | --- |
+| Postgres | one node | primary (`wal_level=replica`, replication slot) + hot standby `db-replica` cloned with `pg_basebackup`, streaming WAL |
+| Sessions | `DatabaseSession` | `DatabaseSession` (primary) + `ReadDatabaseSession` (replica, with fallback) |
+| Consistency | n/a | read-after-write window in Redis, `X-Read-Consistency` override, `X-DB-Node` label |
+| Failure | DB down = 503 | replica down = reads fall back; primary down = reads served from replica, writes 503 |
+| Celery | primary | primary only (a replica cannot be written) |
+
+### Replication setup (`infra/docker-compose.yaml`, `infra/postgres/`)
+
+- **Primary** (`db`): started with `-c wal_level=replica -c max_wal_senders=10
+  -c max_replication_slots=10 -c max_slot_wal_keep_size=1GB` and a
+  `pg_hba.conf` that adds `host replication all all scram-sha-256` (the
+  `replication` keyword is *not* matched by `all`).
+- **`replication-setup`**: idempotent one-shot that creates the `replicator`
+  role and the physical slot `replica1`. It runs as a service rather than an
+  init script so it also works on a data volume that already exists. A slot
+  makes the primary keep the WAL a stopped standby has not consumed
+  (`max_slot_wal_keep_size` caps the disk it may pin).
+- **Replica** (`db-replica`): `replica-entrypoint.sh` takes a
+  `pg_basebackup -R -X stream` on first boot (empty data dir), then starts
+  with `hot_standby=on`. `-R` writes `standby.signal`, which is what makes it a
+  standby; the replica refuses writes (`cannot execute … in a read-only
+  transaction`).
+- **Asynchronous** replication (default): the primary commits without waiting
+  for the standby. Fast writes, but a replica read can be stale, which is the
+  whole point of the consistency design below. `synchronous_commit=remote_apply`
+  would remove staleness at the price of write latency and of a dead replica
+  blocking commits.
+
+`scripts/replication_experiments.sh topology` prints `pg_stat_replication`,
+`pg_is_in_recovery()` on both nodes and the refused write.
+
+### Read/write separation (where in the code)
+
+`shared/db/db.py` builds a second engine from `POSTGRES_REPLICA_HOST` (empty =
+single node, the code degrades to lab 5). `api/deps.py` exposes two sessions:
+
+| Request | Node | Why |
+| --- | --- | --- |
+| `POST /auth/*`, every `PATCH`/`POST` write, restore, resurrect, admin mutations | primary | writes |
+| Authentication (`get_current_user`), `GET /profiles/me`, `GET /memories/backups/{id}` | primary | **strong**: a stale `is_active`/role is a security bug; backup detail shares the restore path |
+| `GET /profiles`, `GET /profiles/{id}`, `GET /memories/backups`, `GET /admin/{users,clones,stats,clones/{id}/backups}` | replica | **eventual**: lists and aggregates tolerate seconds of lag |
+| Celery flush / rollup | primary | writes |
+
+Business-logic classification: *Strictly consistent* = identity, authorization,
+anything that is the input to a write. *Eventually consistent* = browsing
+listings and operator statistics. Every response carries `X-DB-Node` so the
+routing is observable.
+
+### Replication lag and stale reads
+
+`scripts/replication_experiments.sh lag 3s` makes the standby replay WAL 3 s
+late (`recovery_min_apply_delay`), writes, and reads straight away. Measured
+output:
+
+```
+-- immediately, forced to the replica (what a naive router would do):
+HTTP 200  node=replica            status=before-lag     <- stale read
+-- immediately, automatic routing (read-after-write):
+HTTP 200  node=primary-sticky     status=fresh-write
+-- after 3s the standby has caught up:
+HTTP 200  node=replica            status=fresh-write
+```
+
+Without induced delay the lag on this stack is a few milliseconds
+(`pg_stat_replication`, `GET /admin/replication`), so stale reads are rare but
+real; the delay knob makes them reproducible for the demo.
+
+### Read-after-write consistency
+
+| Mechanism | Status | How |
+| --- | --- | --- |
+| **Session sticky routing** | implemented | after a successful non-GET, a Redis key `rw:v1:user:<id>` lives `REPLICA_STICKY_SECONDS` (5 s). While it exists the user's lag-tolerant reads use the primary (`X-DB-Node: primary-sticky`). Redis, not process memory, so it holds across API instances (lab 2). |
+| **Explicit primary routing** | implemented | `X-Read-Consistency: strong` forces the primary, `eventual` forces the replica. |
+| **Writes the owner did not make** | implemented | a rollup in celery sets `rw:v1:clone:<id>`, so the owner's next listing is not re-cached from a standby that has not replayed the new backup. |
+| LSN verification | described only | record `pg_current_wal_lsn()` after a write and read from a replica only once `pg_last_wal_replay_lsn()` has passed it: exact, no fixed window, but needs an extra query per read. |
+
+The window must exceed the worst replication lag, otherwise it closes too
+early; failing to read the flag **fails closed** (primary). Cache-Aside (lab 4)
+interacts: a listing cached from the replica can be at most `TTL + lag` old, and
+the invalidation points above close the window for the writer.
+
+### Fault tolerance (`scripts/replication_experiments.sh failover`)
+
+| Failure | Behaviour (measured) |
+| --- | --- |
+| Replica stopped | reads keep returning 200 with `X-DB-Node: primary-fallback`; per-process circuit breaker skips the dead node for `REPLICA_BREAKER_COOLDOWN_SECONDS`; `/health` stays 200 with `"replica":"error"` |
+| Replica restarted | after the cooldown reads return to `X-DB-Node: replica` |
+| Primary stopped | `GET /profiles` still 200 (`replica-degraded`, identity read from the standby); `PATCH` → **503** `Primary database unavailable; service is read-only`; primary-only GET → 503; `/health` → 503 |
+| Primary restarted | writes succeed again without restarting the API |
+
+Authentication in degraded mode can lag the primary by the replication delay
+(a deactivation made seconds earlier is not seen yet); that is the accepted
+price of keeping reads up and is limited to safe methods.
+
+There is **no automatic promotion**: promoting the standby (`pg_ctl promote`
+or `SELECT pg_promote()`) and repointing the application is a manual step.
+Doing it automatically needs a consensus-based manager (Patroni/etcd, which
+rely on Raft-style leader election) to avoid **split-brain**: two nodes both
+believing they are primary.
+
+### Read scaling impact (`scripts/run_load_tests.sh replica`)
+
+Scenario A (read-intensive) with the lab 4 cache bypassed so every read
+reaches Postgres; 2 API instances, 30 s per point, same host and caveats as
+lab 5. "Single" = `POSTGRES_REPLICA_HOST=` (all reads on the primary).
+Rows are `tup_returned + tup_fetched` from `pg_stat_database` during the run.
+
+| VUs | Topology | RPS | p50 ms | p95 ms | p99 ms | Primary rows | Replica rows |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | single | 260 | 22 | 44 | 66 | 3.46 M | — |
+| 10 | primary + replica | 202 | 25 | 63 | 110 | 0.85 M | 1.21 M |
+| 50 | single | 252 | 113 | 195 | 270 | 3.02 M | — |
+| 50 | primary + replica | 207 | 134 | 240 | 354 | 1.03 M | 1.53 M |
+| 100 | single | 239 | 231 | 476 | 628 | 2.78 M | — |
+| 100 | primary + replica | 215 | 264 | 513 | 677 | 1.05 M | 1.54 M |
+| 200 | single | 230 | 469 | 1339 | 1991 | 2.67 M | — |
+| 200 | primary + replica | 192 | 581 | 1475 | 2234 | 0.93 M | 1.35 M |
+
+Findings, stated plainly:
+
+- **Throughput did not improve; it dropped ~10–20%.** The system is bound by
+  API worker CPU (both api containers sit at ~200% in both topologies, lab 5's
+  bottleneck), not by Postgres. Splitting adds work per request on the same CPU:
+  a second connection checkout/ping, the Redis window lookup, and a second
+  session. Saturation point is unchanged (~10 VUs, ~250 RPS).
+- **Database load did move.** The primary reads ~65% fewer rows
+  (~2.8 M → ~1.0 M at 100 VUs) and its CPU falls from ~50% to ~31% while the
+  replica carries ~29%. The remaining primary load is authentication, which
+  is deliberately strong.
+- So read replicas pay off when the **database** is the bottleneck (heavier
+  queries, analytics, more clients per node), not when the application tier is.
+  Here the right next step is more API CPU, which the replica does not provide.
+- Single 30 s runs on a shared laptop vary ~15% (lab 5 caveats), so the 10–20%
+  gap is at the edge of the noise; the 65% row reduction is not.
+
+### Theory notes
+
+- **Sync vs async vs semi-sync.** Async: lowest write latency, replica may lag
+  and a primary crash can lose the unreplicated tail. Sync: no loss, but every
+  commit waits and a down replica stalls writes. Semi-sync: wait for one of
+  several standbys.
+- **Eventual consistency / CAP / PACELC.** During a partition a system picks
+  availability or consistency (CAP); PACELC adds that even without a partition
+  it trades latency for consistency. This design is PA/EL for listings and
+  PC/EC for identity and writes.
+- **Failover and split-brain.** Promotion must be fenced so the old primary
+  cannot accept writes; leader election with a consensus protocol (Raft in
+  Patroni/etcd) is the standard answer. The old primary must be re-cloned or
+  rewound to rejoin as a standby.
+
+Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
+`scripts/replication_experiments.sh {topology|routing|lag|failover}` and
+`scripts/run_load_tests.sh prep && scripts/run_load_tests.sh replica`.
