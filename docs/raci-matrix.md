@@ -23,6 +23,7 @@ Informed (інформується про результат).
 | Розподілений кеш Cache-Aside (`shared/cache.py`, lab 4) | C | R, A |
 | Реплікація БД та Read/Write Separation (`shared/db/db.py`, `shared/consistency.py`, маршрутизація в `api/deps.py`, `infra/postgres/`, lab 6) | C | R, A |
 | Шардинг data plane: Shard Router, vbuckets, міграція на шарди, моделі решардингу (`shared/sharding.py`, `tools/shard_*.py`, lab 7) | C | R, A |
+| Захист кешу від stampede/avalanche/penetration, Bloom filter, Resilience Profile (`shared/guarded_cache.py`, `shared/bloom.py`, `api/routers/fleet.py`, `docs/resilience-profile.md`, lab 8) | C | R, A |
 | Контейнеризація (Dockerfile'и сервісів, `docker-compose.yaml`, мережі й volumes) | I | R, A |
 | Reverse proxy та балансування навантаження (`infra/nginx/default.conf.template`) | I | R, A |
 | CI/CD pipeline (`.github/workflows/ci.yaml`) | I | R, A |

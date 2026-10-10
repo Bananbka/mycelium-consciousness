@@ -20,6 +20,7 @@ and restore.
 | 5 | Load testing, performance baseline | [Lab 5](#lab-5--load-testing-and-performance-baseline) |
 | 6 | Database replication, read/write separation | [Lab 6](#lab-6--database-replication-and-readwrite-separation) |
 | 7 | Sharding, partitioning, resharding | [Lab 7](#lab-7--data-scaling-sharding-and-partitioning) |
+| 8 | Resilience: stampede, avalanche, penetration | [Lab 8](#lab-8--resilience-engineering-cache-stampede-avalanche-and-penetration) |
 
 ## Architecture
 
@@ -1277,3 +1278,196 @@ Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
 `scripts/shard_experiments.sh {model|distribution|hotshard|fanout}` and
 `scripts/run_load_tests.sh prep && scripts/run_load_tests.sh shard`
 (`RESET_DATA_PLANE=1` empties `memory_*` first - destructive, opt-in).
+
+## Lab 8 — Resilience engineering: cache stampede, avalanche and penetration
+
+Lab 4 made reads cheap *while the cache is warm*. Lab 8 is about the moments it
+is not: the instant a hot key expires, when many keys expire together, and when
+clients ask for things that do not exist.
+
+### The hot object
+
+`GET /fleet/leaderboard?limit=N` (any authenticated user): the top clones by
+archived entries, a `GROUP BY clone_id` over `memory_backups` on **every shard**
+(lab 7 fan-out) joined with designations from the control plane. It is the
+textbook candidate: one global answer for every caller, expensive (it scans the
+whole data plane), cheap to serve once computed, and *identical* for all users,
+so when its key expires every concurrent reader misses at the same instant.
+`GET /fleet/clones/{id}` is the lookup-by-id used for the penetration test.
+
+### Failure modes and defences
+
+| Phenomenon | What happens | Defence implemented (`shared/guarded_cache.py`) |
+| --- | --- | --- |
+| **Cache stampede** (one hot key expires) | every concurrent reader recomputes the same value | single-flight in the process + Redis lock across instances; stale-while-revalidate; XFetch early refresh |
+| **Thundering herd** | the burst of identical queries lands on the database at once | same: one computation, the rest wait on the cache or are served stale |
+| **Cache avalanche** (many keys expire together) | the recomputations of *different* keys arrive in one burst | TTL jitter `ttl * U(1-j, 1+j)` (`CACHE_TTL_JITTER`) |
+| **Cache penetration** (ids that do not exist) | a miss is never cached, so every request reaches the database | negative caching (short TTL) + Bloom filter of existing ids (`shared/bloom.py`) |
+
+```mermaid
+sequenceDiagram
+    participant C as 500 clients
+    participant A as api (any instance)
+    participant R as Redis
+    participant D as shards
+    C->>A: GET /fleet/leaderboard (key just expired)
+    A->>R: GET cache key -> miss
+    A->>A: single-flight: 1st caller leads, 499 await its future
+    A->>R: SET lock:key NX PX 10000 (token)
+    Note over A,R: other instances fail NX and poll the key (<=5 s)
+    A->>R: GET cache key (double-check)
+    A->>D: ONE aggregate query per shard
+    A->>R: SET key (TTL jittered) / DEL lock if token matches
+    A-->>C: 500 x 200 (X-Cache: MISS / COALESCED / LOCK_WAIT / HIT)
+```
+
+Mode per call: `CACHE_PROTECTION=none|lock|swr` (default `lock`). `none` exists
+only so the failure can be reproduced; a request can choose its mode with
+`X-Cache-Protection` when `ALLOW_PROTECTION_OVERRIDE=1` (off by default: it is
+a switch that disables a safety mechanism). Every response carries `X-Cache`:
+`HIT`, `MISS`, `COALESCED` (shared an in-process computation), `LOCK_WAIT`
+(waited for another instance), `STALE` (swr), `NEGATIVE_HIT`, `BLOOM_REJECT`,
+`BYPASS` (Redis unreachable).
+
+### Experiment 1 — stampede on a just-expired key (500 virtual users)
+
+`scripts/stampede_experiments.sh stampede` (tool: `tools/stampede.py`): 500
+connections are opened first, the key is force-expired
+(`POST /admin/cache/flush`), then all 500 requests are released at once. "DB
+computations" is counted by the application
+(`GET /admin/cache-metrics`): the number of times the aggregate actually ran,
+whatever the number of requests. Same data (60 clones x 1 500 backups across 2
+shards), 2 API instances, Redis in Docker, after pool warm-up.
+
+| Mode | DB computations | RPS | p95 ms | p99 ms | Error rate |
+| --- | --- | --- | --- | --- | --- |
+| **Unprotected** (`none`) | **6** | 88 | 5 092 | 5 334 | 0.6% (3 x 502) |
+| **Protected** (`lock`: single-flight + Redis lock) | **1** | 157 | 2 819 | 2 928 | 0% |
+| **Protected** (`swr`) | **1** | 155 | 2 830 | 2 998 | 0% |
+| Unprotected, query made 1 s slower (`none`) | 8 | 72 | 6 428 | 6 521 | **17.6%** (88 x 502) |
+| Protected, 1 s query (`lock`) | 1 | 159 | 2 764 | 2 960 | 0% |
+| Protected, 1 s query (`swr`) | 1 | 134 | 3 264 | 3 501 | 0% |
+
+(`LEADERBOARD_SIMULATED_QUERY_MS=1000` adds `pg_sleep` per shard - the same kind
+of knob as lab 3's `SIMULATED_LATENCY_MS` - to stand in for a production-sized
+table. Raw rows: `load-tests/results/l8_stampede.jsonl`.)
+
+How to read this honestly:
+
+- **500 requests did not become 500 queries.** The number of duplicate
+  computations is *arrival rate x computation time*, not the number of clients.
+  This API serves the burst at ~90-160 RPS (a JWT check and user lookup per
+  request), so only a handful of requests reach the miss before the first
+  computation has stored the value; a faster API or a slower query pushes the
+  count up linearly. The point
+  that holds: with protection it is **always 1**, without it it scales with load
+  and with query time, and the extra work lands exactly when the system is
+  already busiest.
+- **Throughput roughly doubles with protection** (88 -> 157 RPS) and the tail
+  halves; the duplicate aggregates occupy API workers and database connections
+  that the other 490 requests are queueing for (the gap is measured, the exact
+  split of the cause was not isolated). Under the slower query the unprotected
+  run actually drops requests (17.6% 502).
+- `swr` removes the wait entirely for everyone but the very first request after a
+  cold start (stale value + one background refresh), which is why it is the
+  better fit for dashboards that tolerate staleness.
+
+**A finding that is not about the cache.** The first run after the API
+containers were recreated (always the unprotected one) showed 30-41% 502 and the
+control database at 400-474% CPU, while the same mode repeated on warm processes
+showed 0-0.6% errors. The cause was 500 requests hitting freshly started
+processes: new SCRAM-authenticated Postgres connections and new Redis sockets
+all at once. Pools must be warm before a burst is a cache
+experiment; the tool now pre-warms them, and a real deployment needs the same
+(readiness that includes a warmed pool) or a connection pooler.
+
+### Experiment 2 — avalanche and TTL jitter
+
+60 distinct keys (`limit=1..60`), all warmed within the same second, TTL 10 s,
+~80 requests/s spread randomly over them for 28 s. Database computations per
+second after warm-up (`scripts/stampede_experiments.sh avalanche`):
+
+| Setting | Computations in the steady window | **Peak per second** | When the peak occurs |
+| --- | --- | --- | --- |
+| jitter 0, `none` | 128 | **49** | t = 10 s (and again 41 at t = 20 s) |
+| jitter 0, `lock` | 120 | **53** | t = 10 s |
+| jitter 0.3, `none` | 138 | 13 | smeared over t = 7-13 s |
+| jitter 0.3, `lock` | 133 | 18 | smeared over t = 7-13 s |
+
+![avalanche](docs/media/cache-avalanche.png)
+
+- Total work is the same - every key must be recomputed once per TTL - jitter
+  only *spreads* it: the peak falls from 49-53 to 13-18 computations/s (-73% /
+  -66%).
+- **The lock does not help here**: the keys are different, so each of the 60
+  recomputations legitimately holds its own lock. Stampede protection and TTL
+  jitter solve different problems and both are needed.
+- With the natural query cost the p99 in the peak second stayed under 100 ms
+  (59-98 ms); the avalanche is visible in the *count*, and would become a latency
+  spike for a query that is slow enough to saturate a shard.
+
+### Experiment 3 — penetration (`scripts/stampede_experiments.sh penetration`)
+
+1 500 requests (100 concurrent) for ids that do not exist, `same` = one id
+repeated, `distinct` = a new random missing id every time.
+
+| Guard | Pattern | DB computations | RPS | p95 ms | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| none | same id | 1 056 | 31 | 30 684 | 100 x **500** (pool exhausted), 348 coalesced |
+| negative cache | same id | **5** | 34 | 30 367 | 1 386 `NEGATIVE_HIT`; 100 x 500 from the same overload burst |
+| Bloom | same id | **0** | 98 | 3 074 | 1 500 `BLOOM_REJECT` |
+| negative + Bloom | same id | **0** | 96 | 3 320 | 1 500 `BLOOM_REJECT` |
+| none | distinct ids | 1 486 | 25 | 30 334 | 26 x 500, 1 timeout |
+| negative cache | **distinct ids** | **1 478** | 34 | 30 398 | 37 x 500 - negative caching does nothing |
+| Bloom | distinct ids | **0** | 112 | 2 727 | 1 500 `BLOOM_REJECT` |
+| negative + Bloom | distinct ids | **0** | 115 | 2 568 | 1 500 `BLOOM_REJECT` |
+
+- Negative caching is the right tool for a *popular* missing id (1 056 -> 5
+  queries) and useless against *distinct* ids - exactly what an attacker
+  produces. Only the Bloom filter (a 128 KiB bit array in Redis, ~1% false
+  positives, no false negatives) answers those without touching the database.
+- Unprotected, the flood exhausts the SQLAlchemy pool and legitimate requests
+  start failing (500), with 30 s tails: penetration is a denial of service.
+
+### Failure modes of the defences themselves
+
+| Mechanism | Risk | How it is handled / what remains |
+| --- | --- | --- |
+| Distributed lock | **deadlock** if the leader dies holding it | the lock has a TTL (`CACHE_LOCK_TTL_MS`, 10 s); waiters poll for at most `CACHE_LOCK_WAIT_SECONDS` (5 s) and then compute themselves (fail-open) - tests kill the leader and assert a bounded wait |
+| Distributed lock | **lock expiry** while the leader is still computing: a second leader starts (duplicate work, not corruption) | release is a token-checked Lua script, so a late leader never deletes its successor's lock; the TTL must exceed the slowest compute, otherwise the guarantee degrades to "a few" instead of "one" |
+| Redlock | single Redis, not a quorum of independent nodes | acceptable *because* the lock is an optimisation, not a correctness guarantee - a duplicate computation is harmless; for mutual exclusion that must hold (money, inventory) it would not be enough |
+| Lock + Redis down | no coordination, no cache | every request computes: the stampede protection is gone exactly when the cache is (measured: `/fleet/leaderboard` still answers 200, unprotected); the DB pool is the next line of defence |
+| Single-flight | a caller's cancellation could kill the shared computation | the computation runs as its own task behind `asyncio.shield`; an exception reaches every coalesced caller |
+| Negative caching | memory under an id flood (one key per distinct id) and **stale 404**: a clone registered a second after a negative entry is invisible for the negative TTL | short TTL (30 s); with the Bloom filter distinct ids never reach the cache; register adds the id to the filter, and a flushed Bloom filter answers "maybe" until it is reloaded |
+| Bloom filter | a cleared filter must not report real clones as absent | `bloom:v1:clones:ready` marker: until it is set every id is "maybe"; filter is rebuilt from `clone_profiles` on API start |
+| SWR | bounded staleness: up to `ttl + CACHE_STALE_SECONDS` | only for data that tolerates it (leaderboard yes, identity no); background refresh failures are logged and the stale value keeps being served until the hard TTL |
+| Jitter | a longer-lived key can be stale for `ttl * (1 + j)` | accepted; `j` is configurable |
+| Cache client pool | unbounded sockets turn a burst into timeouts and a fail-open stampede | **found by experiment**: 200 concurrent calls from one process produced 100 `BYPASS`; the client now uses a bounded blocking pool (`CACHE_POOL_SIZE`) |
+
+### Theory notes
+
+- **Cache stampede** = many requests, one key, one expiry. **Thundering herd** =
+  the same effect described from the resource's side (many waiters released at
+  once, here also on process restart or after an outage). **Cache avalanche** =
+  many *different* keys expiring together (same TTL, or a cache restart).
+  **Cache penetration** = requests for keys that cannot be in the cache because
+  the data does not exist. Related but distinct: *cache breakdown* (hot key
+  expiry, i.e. stampede).
+- **Redlock** acquires a lock on a majority of N independent Redis nodes within
+  a validity window; its safety under clock drift and GC pauses is disputed, so
+  fencing tokens are needed when the lock protects a correctness property.
+- **XFetch / probabilistic early expiration**: a reader recomputes early with
+  probability `P = exp(-(expiry - now) / (delta * beta))`, equivalently when
+  `now - delta * beta * ln(rand) >= expiry`, where `delta` is the cost of the
+  computation. Expensive values are refreshed earlier, and no coordination is
+  needed. Implemented behind `CACHE_XFETCH_BETA` (off by default).
+- **Bloom filter**: `k` hash functions over an `m`-bit array; false-positive rate
+  `(1 - e^(-kn/m))^k`; no deletions (a counting Bloom filter or a rebuild is
+  needed).
+
+The consolidated view of every failure this system has been tested against is
+in [docs/resilience-profile.md](docs/resilience-profile.md).
+
+Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
+`ALLOW_PROTECTION_OVERRIDE=1 LEADERBOARD_TTL_SECONDS=10 docker compose ... up -d api`
+and `scripts/stampede_experiments.sh {seed|stampede|avalanche|penetration}`.

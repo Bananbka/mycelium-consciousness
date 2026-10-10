@@ -150,7 +150,7 @@ async def clean_redis_streams():
             await client.delete(key)
         cache_client = redis.from_url(cache.CACHE_REDIS_URL, decode_responses=True)
         try:
-            for pattern in ("cache:*", "rw:*"):
+            for pattern in ("cache:*", "rw:*", "bloom:*", "lock:*", "cache-metrics:*"):
                 async for key in cache_client.scan_iter(match=pattern):
                     await cache_client.delete(key)
         finally:

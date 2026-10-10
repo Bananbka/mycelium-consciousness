@@ -1,0 +1,8 @@
+{"label": "none/same", "requests": 1500, "db_computations": 1056, "bloom_rejects": 0, "rps": 31.2, "p50_ms": 488, "p95_ms": 30684, "p99_ms": 36214, "responses": {"500/-": 100, "404/COALESCED": 348, "404/MISS": 1052}}
+{"label": "negative/same", "requests": 1500, "db_computations": 5, "bloom_rejects": 0, "rps": 33.6, "p50_ms": 329, "p95_ms": 30367, "p99_ms": 35514, "responses": {"500/-": 100, "404/COALESCED": 12, "404/MISS": 1, "404/NEGATIVE_HIT": 1386, "502/-": 1}}
+{"label": "bloom/same", "requests": 1500, "db_computations": 0, "bloom_rejects": 1500, "rps": 98.4, "p50_ms": 629, "p95_ms": 3074, "p99_ms": 5087, "responses": {"404/BLOOM_REJECT": 1500}}
+{"label": "both/same", "requests": 1500, "db_computations": 0, "bloom_rejects": 1500, "rps": 96.3, "p50_ms": 685, "p95_ms": 3320, "p99_ms": 4931, "responses": {"404/BLOOM_REJECT": 1500}}
+{"label": "none/distinct", "requests": 1500, "db_computations": 1486, "bloom_rejects": 0, "rps": 24.8, "p50_ms": 636, "p95_ms": 30334, "p99_ms": 30801, "responses": {"404/MISS": 1473, "500/-": 26, "0/ReadTimeout": 1}}
+{"label": "negative/distinct", "requests": 1500, "db_computations": 1478, "bloom_rejects": 0, "rps": 34.2, "p50_ms": 632, "p95_ms": 30398, "p99_ms": 30882, "responses": {"404/MISS": 1463, "500/-": 37}}
+{"label": "bloom/distinct", "requests": 1500, "db_computations": 0, "bloom_rejects": 1500, "rps": 112.0, "p50_ms": 550, "p95_ms": 2727, "p99_ms": 4916, "responses": {"404/BLOOM_REJECT": 1500}}
+{"label": "both/distinct", "requests": 1500, "db_computations": 0, "bloom_rejects": 1500, "rps": 114.9, "p50_ms": 565, "p95_ms": 2568, "p99_ms": 4746, "responses": {"404/BLOOM_REJECT": 1500}}

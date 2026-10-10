@@ -19,7 +19,7 @@ from api.schemas import (
     UserResponse,
 )
 from api.tasks import force_rollup_clone
-from shared import consistency, sharding
+from shared import consistency, guarded_cache, sharding
 from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal
 from shared.db.models import CloneProfile, MemoryBackup, User
 
@@ -306,3 +306,27 @@ async def locate_clone(clone_id: int, _admin: CurrentAdmin) -> dict:
         "vbucket": sharding.router.bucket_for(clone_id),
         "shard": sharding.router.shard_for(clone_id),
     }
+
+
+_FLEET_CACHE_NAMES = ("leaderboard", "fleet-clone")
+
+
+@router.post("/cache/flush")
+async def flush_fleet_cache(_admin: CurrentAdmin) -> dict[str, int]:
+    """Force-expire the fleet read caches (the starting gun of a stampede test)."""
+    removed = await guarded_cache.invalidate("cache:v1:fleet-*")
+    return {"removed": removed}
+
+
+@router.get("/cache-metrics")
+async def cache_metrics(_admin: CurrentAdmin) -> dict[str, dict[str, int]]:
+    """Counters for the guarded cache: ``computes`` is the number of times the
+    database was actually asked, whatever the number of requests."""
+    return {name: await guarded_cache.metrics(name) for name in _FLEET_CACHE_NAMES}
+
+
+@router.post("/cache-metrics/reset")
+async def reset_cache_metrics(_admin: CurrentAdmin) -> dict[str, str]:
+    for name in _FLEET_CACHE_NAMES:
+        await guarded_cache.reset_metrics(name)
+    return {"status": "reset"}

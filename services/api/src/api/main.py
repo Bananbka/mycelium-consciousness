@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import AsyncIterator
@@ -6,20 +7,41 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from api.config import validate_jwt_secret
 from api.deps import SAFE_METHODS, DatabaseSession
-from api.routers import admin, auth, home, memories, profiles
-from shared import consistency, object_storage, sharding, streams
-from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal, dispose_engine
+from api.routers import admin, auth, fleet, home, memories, profiles
+from shared import bloom, consistency, object_storage, sharding, streams
+from shared.db.db import (
+    REPLICA_ENABLED,
+    AsyncSessionLocal,
+    ReplicaSessionLocal,
+    dispose_engine,
+)
+from shared.db.models import CloneProfile
+
+logger = logging.getLogger(__name__)
+
+
+async def _load_bloom_filter() -> None:
+    """Fill the existing-clone Bloom filter once (idempotent across replicas)."""
+    try:
+        if await bloom.is_ready():
+            return
+        async with AsyncSessionLocal() as session:
+            ids = (await session.execute(select(CloneProfile.id))).scalars().all()
+        await bloom.load(ids)
+    except Exception:
+        logger.warning("bloom filter not loaded; lookups fall back to the cache")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     validate_jwt_secret()
     await object_storage.ensure_bucket()
+    await _load_bloom_filter()
     yield
     await dispose_engine()
     await sharding.router.dispose()
@@ -82,6 +104,7 @@ app.include_router(auth.router)
 app.include_router(home.router)
 app.include_router(profiles.router)
 app.include_router(memories.router)
+app.include_router(fleet.router)
 app.include_router(admin.router)
 
 

@@ -20,7 +20,9 @@ CACHE_REDIS_URL = os.getenv(
 KEY_VERSION = "v1"
 BACKUPS_TTL_SECONDS = int(os.getenv("CACHE_BACKUPS_TTL_SECONDS", "60"))
 SOCKET_TIMEOUT = float(os.getenv("CACHE_SOCKET_TIMEOUT_SECONDS", "0.5"))
-TTL_JITTER = 0.1
+TTL_JITTER = float(os.getenv("CACHE_TTL_JITTER", "0.1"))
+POOL_SIZE = int(os.getenv("CACHE_POOL_SIZE", "50"))
+POOL_WAIT_SECONDS = float(os.getenv("CACHE_POOL_WAIT_SECONDS", "2"))
 
 _client: redis.Redis | None = None
 
@@ -28,12 +30,19 @@ _client: redis.Redis | None = None
 def _get_client() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.from_url(
+        # A *bounded, blocking* pool. An unbounded one dials a new socket for
+        # every concurrent request; under a burst those connects blow through
+        # SOCKET_TIMEOUT, every caller "fails open" to the database and the
+        # cache outage becomes exactly the stampede it was meant to prevent.
+        pool = redis.BlockingConnectionPool.from_url(
             CACHE_REDIS_URL,
             decode_responses=True,
+            max_connections=POOL_SIZE,
+            timeout=POOL_WAIT_SECONDS,
             socket_connect_timeout=SOCKET_TIMEOUT,
             socket_timeout=SOCKET_TIMEOUT,
         )
+        _client = redis.Redis(connection_pool=pool)
     return _client
 
 
@@ -55,8 +64,15 @@ async def lookup(key: str) -> tuple[CacheState, Any]:
     return "HIT", json.loads(raw)
 
 
+def jittered_ttl(ttl: float, jitter: float | None = None) -> float:
+    """TTL = base +/- jitter*base, uniformly. Keeps keys written together from
+    expiring together (the cause of a cache avalanche)."""
+    j = TTL_JITTER if jitter is None else jitter
+    return max(1.0, ttl * random.uniform(1 - j, 1 + j))
+
+
 async def store(key: str, value: Any, ttl: int) -> None:
-    jittered = max(1, int(ttl * random.uniform(1 - TTL_JITTER, 1 + TTL_JITTER)))
+    jittered = int(jittered_ttl(ttl))
     try:
         await _get_client().set(key, json.dumps(value), ex=jittered)
     except Exception:

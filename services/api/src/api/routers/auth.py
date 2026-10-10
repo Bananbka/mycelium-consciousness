@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from api.deps import CurrentUser, DatabaseSession
 from api.schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from api.security import create_access_token, hash_password, verify_password
+from shared import bloom
 from shared.db.models import CloneProfile, User, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,7 +49,8 @@ async def register(payload: RegisterRequest, db: DatabaseSession) -> User:
         password_hash=hash_password(payload.password),
         role=UserRole.CLONE,
     )
-    user.profile = CloneProfile(designation=payload.designation)
+    profile = CloneProfile(designation=payload.designation)
+    user.profile = profile
     db.add(user)
 
     try:
@@ -60,7 +62,11 @@ async def register(payload: RegisterRequest, db: DatabaseSession) -> User:
             detail="Email or designation already registered",
         ) from None
 
+    profile_id = profile.id  # read before refresh() expires the relationship
     await db.refresh(user)
+    # Keep the existing-id Bloom filter complete; a clone missing from it would
+    # be answered 404 without a lookup.
+    await bloom.add([profile_id])
     return user
 
 
