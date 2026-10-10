@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,12 +50,26 @@ async def flush_one_stream(session: AsyncSession, clone_id: int) -> dict[str, in
     return {"clone_id": clone_id, "flushed": len(new_items)}
 
 
-async def flush_all_streams(session: AsyncSession) -> list[dict[str, int]]:
+async def flush_all_streams(
+    session: AsyncSession | None,
+    session_for: Callable[[int], AbstractAsyncContextManager[AsyncSession]]
+    | None = None,
+) -> list[dict[str, int]]:
+    """Drain every clone's stream.
+
+    Sharded (``session_for`` given): each clone is flushed on the session of the
+    shard that owns it, opened per clone. Otherwise all clones share ``session``.
+    """
     results = []
     for clone_id in await streams.active_clone_ids():
         try:
-            results.append(await flush_one_stream(session, clone_id))
+            if session_for is None:
+                results.append(await flush_one_stream(session, clone_id))
+            else:
+                async with session_for(clone_id) as shard_session:
+                    results.append(await flush_one_stream(shard_session, clone_id))
         except Exception:
             logger.exception("flush failed for clone_id=%d, skipping", clone_id)
-            await session.rollback()
+            if session is not None:
+                await session.rollback()
     return results

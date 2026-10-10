@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import DatabaseSession, OwnBackup, OwnProfile, ReadDatabaseSession
+from api.deps import (
+    DatabaseSession,
+    OwnBackup,
+    OwnProfile,
+    ShardDatabaseSession,
+    ShardReadSession,
+)
 from api.schemas import (
     BackupDetailResponse,
     BackupResponse,
@@ -15,10 +23,20 @@ from api.schemas import (
     ResurrectRequest,
 )
 from api.tasks import flush_clone_stream
-from shared import backup_codec, cache, object_storage, streams
+from shared import backup_codec, cache, object_storage, sharding, streams
 from shared.db.models import ACTIVE_STATUS, CloneProfile, MemoryBackup
 
 router = APIRouter(prefix="/memories", tags=["memories"])
+
+
+@asynccontextmanager
+async def _data_session_for(clone_id: int, fallback: AsyncSession):
+    """The data-plane session that owns ``clone_id`` (``fallback`` if unsharded)."""
+    if not sharding.router.sharded:
+        yield fallback
+        return
+    async with sharding.router.session(clone_id) as session:
+        yield session
 
 
 @router.post(
@@ -47,7 +65,7 @@ async def stream_status(profile: OwnProfile) -> dict[str, int]:
 @router.get("/backups", response_model=list[BackupResponse])
 async def list_own_backups(
     profile: OwnProfile,
-    db: ReadDatabaseSession,
+    db: ShardReadSession,
     response: Response,
     limit: int = Query(default=50, ge=1, le=200),
     cache_control: str | None = Header(default=None),
@@ -103,7 +121,7 @@ async def read_own_backup(backup: OwnBackup) -> BackupDetailResponse:
 
 @router.post("/backups/{backup_id}/restore", response_model=BackupDetailResponse)
 async def restore_own_backup(
-    backup: OwnBackup, db: DatabaseSession
+    backup: OwnBackup, db: ShardDatabaseSession
 ) -> BackupDetailResponse:
     backup.restored_at = datetime.now(UTC)
     await db.commit()
@@ -121,6 +139,7 @@ async def resurrect_from(
     payload: ResurrectRequest,
     profile: OwnProfile,
     db: DatabaseSession,
+    shard_db: ShardDatabaseSession,
 ) -> BackupDetailResponse:
     if payload.source_profile_id == profile.id:
         raise HTTPException(
@@ -141,12 +160,17 @@ async def resurrect_from(
             detail="Cannot resurrect from a clone that is still active",
         )
 
-    latest = await db.scalar(
-        select(MemoryBackup)
-        .where(MemoryBackup.clone_id == source.id)
-        .order_by(MemoryBackup.period_end.desc())
-        .limit(1)
-    )
+    # The source clone's backups live on *its* shard, generally not the
+    # caller's: a cross-shard read followed by a write on the caller's shard.
+    # There is no distributed transaction - the object copy and the row insert
+    # are ordered so that a failure leaves at worst an unreferenced object.
+    async with _data_session_for(source.id, db) as source_db:
+        latest = await source_db.scalar(
+            select(MemoryBackup)
+            .where(MemoryBackup.clone_id == source.id)
+            .order_by(MemoryBackup.period_end.desc())
+            .limit(1)
+        )
     if latest is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -168,8 +192,8 @@ async def resurrect_from(
         subscription_tier=profile.subscription_tier,
         restored_at=datetime.now(UTC),
     )
-    db.add(resurrected)
-    await db.commit()
+    shard_db.add(resurrected)
+    await shard_db.commit()
     await cache.invalidate_backups(profile.id)
-    await db.refresh(resurrected)
+    await shard_db.refresh(resurrected)
     return await _detail_response(resurrected)

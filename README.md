@@ -19,6 +19,7 @@ and restore.
 | 4 | Distributed caching | [Lab 4](#lab-4--distributed-caching-cache-aside) |
 | 5 | Load testing, performance baseline | [Lab 5](#lab-5--load-testing-and-performance-baseline) |
 | 6 | Database replication, read/write separation | [Lab 6](#lab-6--database-replication-and-readwrite-separation) |
+| 7 | Sharding, partitioning, resharding | [Lab 7](#lab-7--data-scaling-sharding-and-partitioning) |
 
 ## Architecture
 
@@ -1013,3 +1014,266 @@ Findings, stated plainly:
 Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
 `scripts/replication_experiments.sh {topology|routing|lag|failover}` and
 `scripts/run_load_tests.sh prep && scripts/run_load_tests.sh replica`.
+
+## Lab 7 — Data scaling: sharding and partitioning
+
+Lab 6 scaled *reads* of one dataset. Lab 7 splits the dataset itself: the
+memory data plane is spread over two independent PostgreSQL nodes, selected by
+a deterministic router.
+
+### Dataset and shard key
+
+| Entity | Growth | Access key | Decision |
+| --- | --- | --- | --- |
+| `users`, `clone_profiles` | one row per clone | email, user id, designation | **not sharded** (control plane): small, read-mostly, needs global uniqueness (`email`, `designation`) |
+| `memory_buffers` | rewritten continuously, one row/clone | `clone_id` | **sharded** |
+| `memory_backups` | unbounded (hourly/daily/weekly per clone) | `clone_id` | **sharded** |
+
+**Shard key: `clone_id`.**
+
+- *Cardinality*: one value per clone, so the key space is as large as the
+  fleet and can be spread over many nodes. A low-cardinality key such as
+  `subscription_tier` (3 values, most clones `free`) would pin most data to one
+  shard no matter how many shards exist.
+- *Query locality*: every data-plane operation is per clone — a write drains
+  one clone's stream into its buffer, a rollup reads that buffer and writes that
+  clone's backups, a listing reads one clone's backups — so each stays on one
+  shard.
+- *Why not the surrogate `memory_backups.id`*: an auto-increment id says
+  nothing about the owner, so "list this clone's backups" would have to ask
+  every shard, and monotonic ids concentrate all new inserts on the shard that
+  owns the newest range.
+
+### Topology
+
+```mermaid
+flowchart LR
+    client([Clients]) --> nginx --> api["api x2<br/>Shard Router<br/>(shared/sharding.py)"]
+    api -- "users, clone_profiles" --> db[("db: control plane<br/>+ lab 6 replica")]
+    api -- "clone_id -> vbucket -> shard" --> a[("shard-a<br/>buffers, backups")]
+    api -- "clone_id -> vbucket -> shard" --> b[("shard-b<br/>buffers, backups")]
+    celery["celery worker / beat"] -- "flush, rollup per clone" --> a & b
+    celery -- "profiles, tiers" --> db
+    api & celery --> redis[(Redis)]
+    api & celery --> minio[(MinIO)]
+```
+
+Each shard may itself be a lab 6 primary + replica pair; here each is a single
+node to keep the stack small (the control plane keeps its replica).
+
+What changed relative to lab 6:
+
+| Area | Lab 6 | Lab 7 |
+| --- | --- | --- |
+| Data plane | `memory_*` on the primary | `memory_*` on `shard-a` / `shard-b`, chosen by `ShardRouter` |
+| Schema | FKs `memory_*.clone_id -> clone_profiles` | FKs removed (migration `0002`): a constraint cannot span databases |
+| API sessions | `DatabaseSession`, `ReadDatabaseSession` | + `ShardDatabaseSession`, `ShardReadSession` |
+| Celery | single session | per-clone shard session; due-clone join done in the application |
+| Migrations | one database | the same revision applied to `db` and every shard |
+| Single node | n/a | `SHARD_NODES=` (empty) reproduces lab 6 exactly |
+
+### Shard Router (`shared/sharding.py`)
+
+`router.shard_for(clone_id)` is a pure function of the id and the configured
+shard list (`SHARD_NODES`, `SHARD_STRATEGY`), so every API worker and Celery
+process routes identically with no coordination. Python's `hash()` is salted per
+process and is never used; placement uses BLAKE2b.
+
+| Strategy | Placement | Property |
+| --- | --- | --- |
+| `modulo` | `shards[id % N]` | cheapest; inherits any regularity of the id sequence |
+| `hash` | `shards[hash(id) % N]` | breaks id patterns; adding a shard still moves most keys |
+| `vbucket` (default) | `hash(id) % 1024` selects a *virtual bucket*; a bucket -> shard table (rendezvous hashing) says where it lives | adding a shard moves ~1/N of the data; single buckets can be moved on their own |
+
+Inspect a decision: `GET /admin/shards/locate/{clone_id}` (admin). Every
+response served from a shard carries `X-DB-Node: shard-<name>`.
+
+### Data distribution baseline (`scripts/shard_experiments.sh distribution`)
+
+120 clones, 367 writes with a skewed (Zipf-like) profile, strategy `vbucket`,
+measured through `GET /admin/shards`:
+
+| Shard | vbuckets | Clones | Clones % | Entries | Entries % | Write ops | Write ops % |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 523 | 63 | 52.5 | 214 | 58.3 | 63 | 52.5 |
+| B | 501 | 57 | 47.5 | 153 | 41.7 | 57 | 47.5 |
+
+Keys are spread almost evenly; the 58/42 split of *entries* is the traffic
+skew of a few busy clones, which a key-based function cannot see. "Write ops" is
+`n_tup_ins + n_tup_upd + n_tup_del` on the two data-plane tables.
+
+### Hot shard and its fix (`scripts/shard_experiments.sh hotshard`)
+
+Scenario: two onboarding pipelines hand out alternating clone ids; one large
+tenant owns every even id and gets 90% of the connections (reads of its
+backups, cache bypassed, 24 connections, 30 s). Offline model over 10 000 such
+clones (`tools/shard_model.py`):
+
+| Strategy | Shard A % | Shard B % |
+| --- | --- | --- |
+| `key % N` | **100.0** | 0.0 |
+| `hash(key) % N` | 48.9 | 51.0 |
+| virtual buckets | 50.7 | 49.3 |
+
+Live, 3 passes per strategy (the order was rotated, see the note below), mean
+values; the tenant's 20 clones:
+
+| Strategy | Tenant clones on A / B | Rows read A / B, % | DB CPU A / B, % |
+| --- | --- | --- | --- |
+| `modulo` | 20 / 0 | **87.3** / 12.7 | **29.2** / 4.8 |
+| `hash` | 13 / 7 | 61.3 / 38.7 | 16.6 / 10.0 |
+| `vbucket` | 11 / 9 | 52.4 / 47.6 | 15.5 / 12.9 |
+
+![hot shard before and after](docs/media/shard-hotshard.png)
+
+![balance of one tenant across strategies](docs/media/shard-balance.png)
+
+What this does and does not show:
+
+- Under `modulo` shard A does ~87% of the reads and burns ~6x the CPU of shard
+  B; the remaining 13% on B are the quiet odd-id tenant. Hashing the key removes
+  the id pattern; with 20 clones hash still lands 13/7 by chance, buckets 11/9.
+- **Latency did not follow cleanly.** Per-run RPS ranged 89-173 and p95
+  216-480 ms. `vbucket` was the slowest run in the first two passes (89 and 92
+  RPS against 109-150) but the fastest in the pass with the order reversed (173
+  against 165-171), so the gap is run-to-run/host noise on a shared laptop, not
+  a property of the router (a placement decision is one hash and a table
+  lookup). The API tier (CPU-bound since lab 5) hides the database imbalance at
+  this load; the distribution of work (rows, CPU) is the robust result, a real
+  latency effect would appear when a single shard saturates.
+- A single hot *clone* (not a pattern of ids) is still one row on one shard.
+  Virtual buckets do not split it, but they let that bucket be moved alone to an
+  emptier shard (edit the bucket table) - plain `hash % N` cannot.
+
+### Cross-shard queries: scatter-gather
+
+`GET /admin/backups?limit=50` needs the newest backups of the whole fleet; no
+shard can answer alone, so each shard returns its own top 50 and the router
+merges (`X-Shards-Queried: 2`). `GET /admin/stats` sums per-shard counts the same
+way. Compared with the shard-local `GET /memories/backups` (cache bypassed), same
+data, same load generator (`scripts/shard_experiments.sh fanout`, tables emptied
+and re-seeded for each topology):
+
+| Topology | Query | RPS | p50 ms | p95 ms | p99 ms |
+| --- | --- | --- | --- | --- | --- |
+| single db | shard-local list | 209 | 88 | 142 | 207 |
+| single db | global list | 234 | 79 | 114 | 172 |
+| 2 shards | shard-local list | 211 | 85 | 146 | 261 |
+| 2 shards | **global list (fan-out)** | 194 | 87 | **223** | **369** |
+
+The local query is untouched by sharding (it still reads one node). The
+fan-out costs roughly +2x at the tail: two round trips (latency = slowest
+shard + merge), twice the connections held per request, and the work grows
+linearly with the shard count while a single-node query would have stayed one
+index scan. Here the tables are tiny (a few thousand rows), so sharding cannot
+buy anything back; the penalty is the fixed per-shard overhead.
+
+Related consequences handled in code:
+
+- **Distributed JOIN.** Due-clone detection used to join `clone_profiles` with
+  `memory_backups` in SQL. With the tables on different databases it is now two
+  queries - newest `period_end` per clone from every shard, then a filtered scan
+  of profiles - joined in Python (`find_due_clones`).
+- **Uniqueness.** `memory_backups.id` comes from a per-shard sequence, so ids
+  repeat across shards; an id is only meaningful together with its owner, which
+  is how `/memories/backups/{id}` already resolves it. Global uniqueness would
+  need ULIDs or an id-range per shard. `users.email` / `designation` stay unique
+  because they live on the single control plane.
+- **Referential integrity** moves into the application: a profile is created
+  before its data and no code path hard-deletes profiles.
+
+### Cross-shard writes and transactions
+
+`POST /memories/resurrect` copies the latest backup of a *source* clone (one
+shard) into the *caller* (generally another shard). A local ACID transaction
+cannot cover two databases: if the insert on shard B committed and a failure hit
+before the matching step on A (or the reverse) there is no atomic rollback.
+Options, in the order they were considered:
+
+1. **Two-phase commit (2PC)**: a coordinator asks all shards to PREPARE, then
+   COMMIT. Correct, but blocking: if the coordinator dies between phases the
+   participants hold locks until it recovers; every write pays two round trips
+   and a prepared-transaction store.
+2. **Saga**: a chain of local transactions with compensations. Cheap and
+   non-blocking, but the intermediate states are visible and compensations must
+   be idempotent.
+3. **Re-design so the operation is shard-local.** What is implemented: the
+   operation is ordered as *read source shard -> copy the object in MinIO ->
+   insert one row on the caller's shard -> invalidate cache*. Exactly one
+   database writes, so one local transaction decides the outcome; the only
+   failure residue is an unreferenced object, which is harmless and can be
+   garbage-collected. This is a Saga whose only compensation is "ignore".
+
+### Resharding model (`tools/shard_model.py`)
+
+Adding a shard changes `N`. Fraction of 20 000 keys that must move (production
+router code):
+
+| Change | `key % N` | `hash(key) % N` | consistent-hash ring (128 vnodes) | 1024 virtual buckets | Ideal |
+| --- | --- | --- | --- | --- | --- |
+| 2 -> 3 shards | 66.7% | 66.6% | 32.0% | 32.7% | 33.3% |
+| 2 -> 4 shards | 50.0% | 50.0% | 46.9% | 49.5% | 50.0% |
+| 3 -> 4 shards | 75.0% | 75.0% | 23.7% | 25.0% | 25.0% |
+
+![resharding cost](docs/media/shard-resharding.png)
+
+Going from `N` to `N+1` with `key % N` moves a fraction `N/(N+1)` of the data
+(67%, 75%, ... approaching 100% for large clusters); only the doubling
+2 -> 4 is "cheap" because the old residues nest in the new ones. Consistent
+hashing places both nodes and keys on a ring so a new node only takes the
+keys between itself and its predecessor - `~1/(N+1)` of the data, all of it
+flowing *to* the new node. Virtual buckets achieve the same with a fixed number
+of buckets: only the reassigned buckets move (`test_vbucket_moves_about_one_over_n_and_only_to_the_new_shard`
+asserts that nothing moves between existing shards). The bucket count caps the
+granularity (1024 buckets over 3 shards are ~341 each) and must be chosen up
+front; changing it is itself a full reshard.
+
+Live migration is not implemented. The procedure the design supports: add the
+node to `SHARD_NODES`, copy the rows of reassigned buckets while dual-writing
+or pausing their streams, switch the table, delete the source rows.
+
+### Benchmark: single database vs two shards (k6, `scripts/run_load_tests.sh shard`)
+
+Lab 5 scripts, 2 API instances, 30 s per point, 10/50/100 VUs, tables emptied
+and re-seeded per topology (50 clones x 50 backups), same host caveats as lab 5.
+Scenario A = shard-local read (cache bypassed), E = cross-shard fan-out
+(`/admin/backups`).
+
+| VUs | Topology | A: RPS | A: p95 ms | A: p99 ms | E: RPS | E: p95 ms | E: p99 ms | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | single | 227 | 45 | 93 | 303 | 33 | 40 | 0% |
+| 10 | 2 shards | 238 | 42 | 70 | 215 | 39 | 124 | 0% |
+| 50 | single | 204 | 253 | 350 | 292 | 155 | 234 | 0% |
+| 50 | 2 shards | 207 | 257 | 326 | 152 | 329 | 418 | 0% |
+| 100 | single | 222 | 510 | 695 | 279 | 393 | 525 | 0% |
+| 100 | 2 shards | 213 | 557 | 765 | 173 | 601 | 760 | 0% |
+
+Reading it:
+
+- **Shard-local reads: no change** (within the ~15% run-to-run noise of lab 5).
+  The bottleneck is still API CPU (~200% per container), so doubling the
+  database nodes cannot raise throughput - the saturation point (~10 VUs,
+  ~220-250 RPS for A) is the same in both topologies.
+- **Fan-out reads: 29-48% less throughput and 1.5-2x p95** (10-100 VUs) - the
+  measured price of a query without the shard key.
+- Sharding here buys capacity headroom (storage, flush write throughput, per-node
+  working set), not speed; at 2 500 backup rows it has nothing to win back.
+  It pays off when one node cannot hold or write the dataset, not on a laptop.
+
+### Partitioning vs sharding vs replication
+
+| | Partitioning | Sharding | Replication |
+| --- | --- | --- | --- |
+| Splits | one table into pieces inside **one** database (range/list/hash `PARTITION BY`) | the dataset across **several** independent databases | copies the **same** data to more nodes |
+| Goal | smaller indexes, partition pruning, cheap retention (`DROP PARTITION`) | capacity and write throughput beyond one node | read scaling, availability |
+| Cost | none for the application | routing, cross-shard queries/transactions, resharding | lag, failover |
+
+They compose: each shard can be partitioned (e.g. `memory_backups` by
+`period_end`) and replicated (lab 6). Native partitioning was not applied here:
+`memory_backups` is pruned by per-tier retention (a handful of rows per clone),
+so there is no big time-ordered table to prune.
+
+Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
+`scripts/shard_experiments.sh {model|distribution|hotshard|fanout}` and
+`scripts/run_load_tests.sh prep && scripts/run_load_tests.sh shard`
+(`RESET_DATA_PLANE=1` empties `memory_*` first - destructive, opt-in).

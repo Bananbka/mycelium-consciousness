@@ -7,6 +7,8 @@ const VUS = parseInt(__ENV.VUS || '10');
 const DURATION = __ENV.DURATION || '30s';
 const WARMUP = __ENV.WARMUP || '10s';
 const NOCACHE = __ENV.NOCACHE === '1';
+const ADMIN_EMAIL = __ENV.ADMIN_EMAIL; // scenario E (lab 7: cross-shard fan-out) needs an admin
+const ADMIN_PASSWORD = __ENV.ADMIN_PASSWORD;
 const RAMP = __ENV.RAMP === '1'; // one staged run: 10 -> 25 -> 50 -> 100 -> 200 VUs
 const STAGE = __ENV.STAGE || '30s';
 const USERS = 50;
@@ -44,7 +46,13 @@ export function setup() {
     const r = http.post(`${BASE}/auth/login`, JSON.stringify(creds), { headers: JSON_H });
     tokens.push(r.json('access_token'));
   }
-  return { tokens };
+  let admin = null;
+  if (ADMIN_EMAIL) {
+    const r = http.post(`${BASE}/auth/login`,
+      JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }), { headers: JSON_H });
+    admin = r.json('access_token');
+  }
+  return { tokens, admin };
 }
 
 function headers(data) {
@@ -57,6 +65,12 @@ function readBackups(data) {
   const r = http.get(`${BASE}/memories/backups?limit=50`, headers(data));
   check(r, { 'backups 200': (x) => x.status === 200 });
 }
+// Lab 7: newest backups across every shard (scatter-gather).
+function fanOut(data) {
+  const r = http.get(`${BASE}/admin/backups?limit=50`,
+    { headers: { Authorization: `Bearer ${data.admin}` } });
+  check(r, { 'fan-out 200': (x) => x.status === 200 });
+}
 function writeMemory(data) {
   const r = http.post(`${BASE}/memories/write`,
     JSON.stringify({ content: 'x'.repeat(64 + (__ITER % 64)) }),
@@ -67,6 +81,8 @@ function writeMemory(data) {
 export function run(data) {
   if (SCENARIO === 'A') {
     readBackups(data);
+  } else if (SCENARIO === 'E') {
+    fanOut(data);
   } else if (SCENARIO === 'B') {
     writeMemory(data);
   } else {

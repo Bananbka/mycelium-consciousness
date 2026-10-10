@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, select, text
 
-from api.deps import CurrentAdmin, DatabaseSession, ReadDatabaseSession
+from api.deps import (
+    CloneShardReadSession,
+    CurrentAdmin,
+    DatabaseSession,
+    ReadDatabaseSession,
+)
 from api.schemas import (
     BackupResponse,
     ProfileResponse,
@@ -14,7 +19,7 @@ from api.schemas import (
     UserResponse,
 )
 from api.tasks import force_rollup_clone
-from shared import consistency
+from shared import consistency, sharding
 from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal
 from shared.db.models import CloneProfile, MemoryBackup, User
 
@@ -64,7 +69,7 @@ async def update_subscription(
 async def list_clone_backups(
     profile_id: int,
     _admin: CurrentAdmin,
-    db: ReadDatabaseSession,
+    db: CloneShardReadSession,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[MemoryBackup]:
     result = await db.execute(
@@ -124,11 +129,23 @@ async def deactivate_user(
 
 @router.get("/stats")
 async def registry_stats(
-    _admin: CurrentAdmin, db: ReadDatabaseSession
+    _admin: CurrentAdmin,
+    db: ReadDatabaseSession,
+    response: Response,
+    primary: DatabaseSession,
 ) -> dict[str, int]:
     users = await db.scalar(select(func.count()).select_from(User))
     clones = await db.scalar(select(func.count()).select_from(CloneProfile))
-    backups = await db.scalar(select(func.count()).select_from(MemoryBackup))
+    if sharding.router.sharded:
+        # Cross-shard aggregate: one COUNT per shard, summed here.
+        async def count(_name: str, shard) -> int:
+            return await shard.scalar(select(func.count()).select_from(MemoryBackup))
+
+        per_shard = await sharding.router.fan_out(count)
+        backups = sum(v or 0 for v in per_shard.values())
+        response.headers["X-Shards-Queried"] = str(len(per_shard))
+    else:
+        backups = await primary.scalar(select(func.count()).select_from(MemoryBackup))
     return {
         "users": users or 0,
         "clones": clones or 0,
@@ -196,4 +213,96 @@ async def replication_status(_admin: CurrentAdmin, db: DatabaseSession) -> dict:
         "replica": replica,
         "breaker_open": consistency.replica_breaker.is_open,
         "read_after_write_window_seconds": consistency.STICKY_SECONDS,
+    }
+
+
+@router.get("/backups", response_model=list[BackupResponse])
+async def list_all_backups(
+    _admin: CurrentAdmin,
+    response: Response,
+    primary: DatabaseSession,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[MemoryBackup]:
+    """Newest backups across the whole fleet - a scatter-gather query.
+
+    No shard can answer it alone: every shard returns its own top ``limit`` and
+    the result is merged and cut here. The cost is one round trip per shard
+    (issued concurrently), so latency is that of the slowest shard plus the
+    merge, and the work grows with the shard count - the price of a query that
+    does not contain the shard key.
+    """
+    query = select(MemoryBackup).order_by(MemoryBackup.period_end.desc()).limit(limit)
+    if not sharding.router.sharded:
+        response.headers["X-Shards-Queried"] = "1"
+        return list((await primary.execute(query)).scalars().all())
+
+    async def top(_name: str, shard) -> list[MemoryBackup]:
+        return list((await shard.execute(query)).scalars().all())
+
+    parts = await sharding.router.fan_out(top)
+    response.headers["X-Shards-Queried"] = str(len(parts))
+    merged = [row for rows in parts.values() for row in rows]
+    merged.sort(key=lambda b: b.period_end, reverse=True)
+    return merged[:limit]
+
+
+_SHARD_STATS = text(
+    """
+    SELECT
+      (SELECT count(*) FROM (
+          SELECT clone_id FROM memory_buffers
+          UNION SELECT clone_id FROM memory_backups) t)            AS clones,
+      (SELECT count(*) FROM memory_buffers)                        AS buffers,
+      (SELECT count(*) FROM memory_backups)                        AS backups,
+      (SELECT COALESCE(sum(entry_count), 0) FROM memory_buffers)   AS buffered_entries,
+      (SELECT COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)
+         FROM pg_stat_user_tables
+        WHERE relname IN ('memory_buffers', 'memory_backups'))::bigint AS write_ops
+    """
+)
+
+
+@router.get("/shards")
+async def shard_distribution(_admin: CurrentAdmin, primary: DatabaseSession) -> dict:
+    """Where the data plane actually is: the data distribution matrix.
+
+    ``clones`` is the number of distinct shard keys holding data, ``write_ops``
+    the cumulative inserts/updates/deletes on the two data-plane tables since
+    the shard's statistics were last reset.
+    """
+    router_ = sharding.router
+
+    async def stats(_name: str, session) -> dict:
+        return dict((await session.execute(_SHARD_STATS)).mappings().one())
+
+    if router_.sharded:
+        per_shard = await router_.fan_out(stats)
+    else:
+        per_shard = {sharding.DEFAULT_SHARD: await stats("", primary)}
+
+    buckets = router_.bucket_counts()
+    return {
+        "strategy": router_.strategy,
+        "sharded": router_.sharded,
+        "vbuckets": sharding.VBUCKETS,
+        "shards": [
+            {
+                "name": name,
+                "host": router_.nodes[name].host if name in router_.nodes else "db",
+                "vbuckets": buckets.get(name, 0),
+                **{k: int(v) for k, v in per_shard[name].items()},
+            }
+            for name in router_.names
+        ],
+    }
+
+
+@router.get("/shards/locate/{clone_id}")
+async def locate_clone(clone_id: int, _admin: CurrentAdmin) -> dict:
+    """Which shard a clone id routes to - the router's decision, made visible."""
+    return {
+        "clone_id": clone_id,
+        "strategy": sharding.router.strategy,
+        "vbucket": sharding.router.bucket_for(clone_id),
+        "shard": sharding.router.shard_for(clone_id),
     }

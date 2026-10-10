@@ -10,6 +10,14 @@ DURATION="${DURATION:-30s}"
 psql_() { $C exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"; }
 rpsql_() { $C exec -T db-replica psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"; }
 replica_rows_read() { rpsql_ "SELECT tup_returned+tup_fetched FROM pg_stat_database WHERE datname='$POSTGRES_DB'" 2>/dev/null || echo 0; }
+shard_rows() { # "a:N b:N" - rows read on each shard (empty when unsharded)
+  local out=""
+  for svc in shard-a shard-b; do
+    v=$($C exec -T "$svc" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT tup_returned+tup_fetched FROM pg_stat_database WHERE datname='$POSTGRES_DB'" 2>/dev/null || echo 0)
+    out="$out ${svc#shard-}:${v:-0}"
+  done
+  echo "$out"
+}
 rows_read() { psql_ "SELECT tup_returned+tup_fetched FROM pg_stat_database WHERE datname='$POSTGRES_DB'"; }
 backups_rows() { psql_ "SELECT seq_tup_read+COALESCE(idx_tup_fetch,0) FROM pg_stat_user_tables WHERE relname='memory_backups'"; }
 scale() {
@@ -19,7 +27,7 @@ scale() {
 k6run() { # name scenario vus [extra -e args]
   local name="$1" scen="$2" vus="$3"; shift 3
   echo ">>> $name (scenario $scen, $vus VUs, ${DURATION})"
-  local before after bbefore bafter rbefore; before=$(rows_read); bbefore=$(backups_rows); rbefore=$(replica_rows_read)
+  local before after bbefore bafter rbefore sbefore; before=$(rows_read); bbefore=$(backups_rows); rbefore=$(replica_rows_read); sbefore=$(shard_rows)
   ( sleep 25; docker stats --no-stream --format '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}'       > "load-tests/results/$name.stats" 2>/dev/null ) &
   docker run --rm -i --cpus=2 --network "$NET" \
     -v "$PWD/load-tests:/lt" grafana/k6:latest run --quiet \
@@ -30,10 +38,12 @@ k6run() { # name scenario vus [extra -e args]
   sleep 2  # let pg_stat_* flush
   after=$(rows_read); echo "$((after-before))" > "load-tests/results/$name.dbrows"
   echo "$(( $(replica_rows_read) - rbefore ))" > "load-tests/results/$name.replicarows"
+  sleep 12  # per-table counters are published lazily by idle backends
+  echo "before:$sbefore after:$(shard_rows)" > "load-tests/results/$name.shardrows"
   bafter=$(backups_rows); echo "$((bafter-bbefore))" > "load-tests/results/$name.backupsrows"
 }
 
-case "${1:?matrix|scaling|cache|replica|prep}" in
+case "${1:?matrix|scaling|cache|replica|shard|prep}" in
 prep)
   scale 2
   k6run prep PREP 1
@@ -73,6 +83,28 @@ replica)  # lab 6: read scaling, scenario A with the cache bypassed so every rea
     done
   done
   POSTGRES_REPLICA_HOST="db-replica" $C up -d --no-deps --scale api=2 api >/dev/null 2>&1 ;;
+shard)    # lab 7: single database vs 2 shards. A = shard-local read (cache bypassed),
+          # E = cross-shard fan-out (needs ADMIN_EMAIL / ADMIN_PASSWORD).
+  : "${ADMIN_EMAIL:?set ADMIN_EMAIL}" "${ADMIN_PASSWORD:?set ADMIN_PASSWORD}"
+  reset_plane() { # RESET_DATA_PLANE=1: stale rows would skew single-vs-sharded scan sizes
+    [ "${RESET_DATA_PLANE:-0}" = 1 ] || return 0
+    for svc in db shard-a shard-b; do
+      $C exec -T "$svc" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -qc \
+        "TRUNCATE memory_backups, memory_buffers" >/dev/null
+    done
+  }
+  for topo in single sharded; do
+    nodes=""; [ "$topo" = sharded ] && nodes="a=shard-a:5432,b=shard-b:5432"
+    reset_plane
+    SHARD_NODES="$nodes" $C up -d --no-deps --scale api=2 api celery-worker celery-beat >/dev/null 2>&1
+    sleep 10; $C restart nginx >/dev/null 2>&1; sleep 4
+    uv run --with httpx python tools/shard_load.py seed --backups 50 >/dev/null
+    for vus in ${LEVELS:-10 50 100 200}; do
+      k6run "l7_${topo}_A_${vus}" A "$vus" -e NOCACHE=1
+      k6run "l7_${topo}_E_${vus}" E "$vus" -e ADMIN_EMAIL="$ADMIN_EMAIL" -e ADMIN_PASSWORD="$ADMIN_PASSWORD"
+    done
+  done
+  SHARD_NODES="a=shard-a:5432,b=shard-b:5432" $C up -d --no-deps --scale api=2 api celery-worker celery-beat >/dev/null 2>&1 ;;
 cache)    # scenario A with the cache bypassed, 100 VUs, 2 instances
   scale 2; k6run "nocache_A_100" A 100 -e NOCACHE=1 ;;
 esac

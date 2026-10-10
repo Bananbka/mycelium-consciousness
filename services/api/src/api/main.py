@@ -12,7 +12,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from api.config import validate_jwt_secret
 from api.deps import SAFE_METHODS, DatabaseSession
 from api.routers import admin, auth, home, memories, profiles
-from shared import consistency, object_storage, streams
+from shared import consistency, object_storage, sharding, streams
 from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal, dispose_engine
 
 
@@ -22,6 +22,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await object_storage.ensure_bucket()
     yield
     await dispose_engine()
+    await sharding.router.dispose()
 
 
 app = FastAPI(title="Mycelium Consciousness Admin API", lifespan=lifespan)
@@ -96,6 +97,11 @@ async def _probe_db(db) -> None:
     await db.execute(text("SELECT 1"))
 
 
+async def _probe_shard(name: str) -> None:
+    async with sharding.router.session_for_shard(name) as session:
+        await session.execute(text("SELECT 1"))
+
+
 async def _probe_replica() -> None:
     async with ReplicaSessionLocal() as session:
         await session.execute(text("SELECT 1"))
@@ -116,6 +122,11 @@ async def health_check(db: DatabaseSession):
         "redis": await _check(_probe_redis),
         "object_storage": await _check(_probe_minio),
     }
+    if sharding.router.sharded:
+        # The data plane is critical: a shard that cannot answer means every
+        # clone routed to it is down, even though the API itself is fine.
+        for name in sharding.router.names:
+            checks[f"shard_{name}"] = await _check(lambda n=name: _probe_shard(n))
     healthy = all(v == "ok" for v in checks.values())
     # Informational: a down standby degrades read capacity, not availability
     # (reads fall back to the primary), so it must not pull the node out of

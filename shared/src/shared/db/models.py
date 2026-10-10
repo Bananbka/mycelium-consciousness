@@ -86,17 +86,6 @@ class CloneProfile(Base):
     )
 
     user: Mapped["User | None"] = relationship(back_populates="profile")
-    buffer: Mapped["MemoryBuffer | None"] = relationship(
-        back_populates="clone",
-        uselist=False,
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-    backups: Mapped[list["MemoryBackup"]] = relationship(
-        back_populates="clone",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
 
 
 class MemoryBuffer(Base):
@@ -111,10 +100,10 @@ class MemoryBuffer(Base):
 
     __tablename__ = "memory_buffers"
 
-    clone_id: Mapped[int] = mapped_column(
-        ForeignKey("clone_profiles.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    # Shard key. Deliberately not a ForeignKey: the data plane may live on a
+    # different database than clone_profiles (lab 7), where a constraint cannot
+    # exist. The application owns this reference.
+    clone_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     payload_blob: Mapped[bytes] = mapped_column("payload", LargeBinary)
     entry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
@@ -123,8 +112,6 @@ class MemoryBuffer(Base):
         onupdate=func.now(),
         nullable=False,
     )
-
-    clone: Mapped[CloneProfile] = relationship(back_populates="buffer")
 
     @property
     def payload(self) -> list[dict]:
@@ -144,9 +131,8 @@ class MemoryBackup(Base):
     __tablename__ = "memory_backups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    clone_id: Mapped[int] = mapped_column(
-        ForeignKey("clone_profiles.id", ondelete="CASCADE"),
-    )
+    # Shard key; see MemoryBuffer.clone_id for why this is not a ForeignKey.
+    clone_id: Mapped[int] = mapped_column(Integer)
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     entry_count: Mapped[int] = mapped_column(Integer)
@@ -164,8 +150,6 @@ class MemoryBackup(Base):
         nullable=False,
     )
     restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    clone: Mapped[CloneProfile] = relationship(back_populates="backups")
 
     __table_args__ = (
         Index("ix_memory_backups_clone_id_period_end", "clone_id", "period_end"),

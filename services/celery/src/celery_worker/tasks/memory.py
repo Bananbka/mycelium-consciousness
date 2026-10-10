@@ -7,11 +7,14 @@ from celery_worker.flush import flush_all_streams, flush_one_stream
 from celery_worker.pipeline import rollup_clone, run_rollup
 from shared.db import AsyncSessionLocal
 from shared.db.models import CloneProfile
+from shared.sharding import router
 
 
 @app.task(name="memory.flush_due_streams")
 def flush_due_streams() -> list[dict[str, int]]:
     async def run() -> list[dict[str, int]]:
+        if router.sharded:
+            return await flush_all_streams(None, router.session)
         async with AsyncSessionLocal() as session:
             return await flush_all_streams(session)
 
@@ -21,7 +24,7 @@ def flush_due_streams() -> list[dict[str, int]]:
 @app.task(name="memory.flush_clone_stream")
 def flush_clone_stream(clone_id: int) -> dict[str, int]:
     async def run() -> dict[str, int]:
-        async with AsyncSessionLocal() as session:
+        async with router.session(clone_id) as session:
             return await flush_one_stream(session, clone_id)
 
     return run_async(run())
@@ -31,7 +34,7 @@ def flush_clone_stream(clone_id: int) -> dict[str, int]:
 def rollup_due_clones() -> list[dict[str, str | int]]:
     async def run() -> list[dict[str, str | int]]:
         async with AsyncSessionLocal() as session:
-            return await run_rollup(session)
+            return await run_rollup(session, router)
 
     return run_async(run())
 
@@ -49,6 +52,7 @@ def force_rollup_clone(clone_id: int) -> dict[str, str | int]:
             clone = await session.get(CloneProfile, clone_id)
             if clone is None:
                 return {"clone_id": clone_id, "status": "not_found", "entry_count": 0}
-            return await rollup_clone(session, clone, datetime.now(UTC))
+            async with router.session(clone_id) as shard_session:
+                return await rollup_clone(shard_session, clone, datetime.now(UTC))
 
     return run_async(run())

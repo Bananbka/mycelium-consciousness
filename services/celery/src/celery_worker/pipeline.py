@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared import cache, consistency, object_storage
 from shared.db import CloneProfile, MemoryBackup, MemoryBuffer
+from shared.sharding import ShardRouter
 from shared.subscriptions import BACKUP_POLICIES
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,45 @@ def _cutoff_by_tier(now: datetime):
     )
 
 
-async def find_due_clones(session: AsyncSession, now: datetime) -> list[CloneProfile]:
+async def _last_backup_ends(router: ShardRouter) -> dict[int, datetime]:
+    """Scatter-gather: newest ``period_end`` per clone from every shard."""
+
+    async def one(_name: str, shard: AsyncSession) -> dict[int, datetime]:
+        rows = await shard.execute(
+            select(MemoryBackup.clone_id, func.max(MemoryBackup.period_end)).group_by(
+                MemoryBackup.clone_id
+            )
+        )
+        return {clone_id: ended for clone_id, ended in rows}
+
+    merged: dict[int, datetime] = {}
+    for part in (await router.fan_out(one)).values():
+        merged.update(part)
+    return merged
+
+
+async def find_due_clones(
+    session: AsyncSession, now: datetime, router: ShardRouter | None = None
+) -> list[CloneProfile]:
+    if router is not None and router.sharded:
+        # The join between clone_profiles (control plane) and memory_backups
+        # (shards) cannot be done by one database. Pre-filter in SQL with the
+        # only column the control plane has (created_at is a lower bound of the
+        # anchor), then finish the join in the application.
+        last_end = await _last_backup_ends(router)
+        result = await session.execute(
+            select(CloneProfile).where(CloneProfile.created_at <= _cutoff_by_tier(now))
+        )
+        due = []
+        for clone in result.scalars():
+            anchor = last_end.get(clone.id, clone.created_at)
+            if (
+                _aware(anchor)
+                <= now - BACKUP_POLICIES[clone.subscription_tier].interval
+            ):
+                due.append(clone)
+        return due
+
     last_backup = (
         select(
             MemoryBackup.clone_id,
@@ -135,14 +174,20 @@ async def rollup_clone(
     }
 
 
-async def run_rollup(session: AsyncSession) -> list[dict[str, str | int]]:
+async def run_rollup(
+    session: AsyncSession, router: ShardRouter | None = None
+) -> list[dict[str, str | int]]:
     now = datetime.now(UTC)
-    due = await find_due_clones(session, now)
+    due = await find_due_clones(session, now, router)
 
     results = []
     for clone in due:
         try:
-            results.append(await rollup_clone(session, clone, now))
+            if router is not None and router.sharded:
+                async with router.session(clone.id) as shard_session:
+                    results.append(await rollup_clone(shard_session, clone, now))
+            else:
+                results.append(await rollup_clone(session, clone, now))
         except Exception:
             logger.exception("rollup failed for clone_id=%d, skipping", clone.id)
             await session.rollback()

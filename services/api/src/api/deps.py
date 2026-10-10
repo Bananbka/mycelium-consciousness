@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
@@ -15,6 +16,7 @@ from shared import consistency
 from shared.consistency import CONNECTIVITY_ERRORS, replica_breaker
 from shared.db.db import REPLICA_ENABLED, ReplicaSessionLocal, get_db
 from shared.db.models import CloneProfile, MemoryBackup, User, UserRole
+from shared.sharding import router
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +145,38 @@ async def get_own_profile(user: CurrentClone) -> CloneProfile:
 OwnProfile = Annotated[CloneProfile, Depends(get_own_profile)]
 
 
+async def get_shard_db(
+    request: Request,
+    profile: OwnProfile,
+    primary: DatabaseSession,
+) -> AsyncIterator[AsyncSession]:
+    """Session on the shard that owns the caller's data plane (lab 7).
+
+    Without sharding this is just the primary session, so every data-plane
+    handler is written once and works in both topologies. With sharding it is a
+    session on the shard chosen by ``clone_id``; identity (``profile``) was
+    already loaded from the control plane, which this session never touches.
+    """
+    if not router.sharded:
+        yield primary
+        return
+    shard = router.shard_for(profile.id)
+    request.state.db_node = f"shard-{shard}"
+    async with router.session_for_shard(shard) as session:
+        yield session
+
+
+ShardDatabaseSession = Annotated[AsyncSession, Depends(get_shard_db)]
+
+
 async def get_own_backup(
     backup_id: int,
     profile: OwnProfile,
-    db: DatabaseSession,
+    db: ShardDatabaseSession,
 ) -> MemoryBackup:
+    # backup ids come from a per-shard sequence, so an id is only meaningful
+    # together with its owner (and therefore its shard) - which is the lookup
+    # that is done here.
     backup = await db.get(MemoryBackup, backup_id)
     if backup is None or backup.clone_id != profile.id:
         raise HTTPException(
@@ -179,16 +208,10 @@ async def _choose_read_node(request: Request, user: User) -> str:
     return "replica"
 
 
-async def get_read_db(
-    request: Request,
-    user: CurrentUser,
-    primary: DatabaseSession,
+@asynccontextmanager
+async def _replica_aware_session(
+    request: Request, user: User, primary: AsyncSession
 ) -> AsyncIterator[AsyncSession]:
-    """Session for reads that tolerate replica lag (eventual consistency).
-
-    Falls back to the primary - never to an error - when the caller just wrote
-    (read-after-write), asked for ``strong``, or the standby is unreachable.
-    """
     node = await _choose_read_node(request, user)
 
     replica: AsyncSession | None = None
@@ -216,11 +239,70 @@ async def get_read_db(
     request.state.db_node = (
         "replica-degraded" if getattr(request.state, "degraded", False) else node
     )
-
     try:
         yield replica
     finally:
         await replica.close()
 
 
+async def get_read_db(
+    request: Request,
+    user: CurrentUser,
+    primary: DatabaseSession,
+) -> AsyncIterator[AsyncSession]:
+    """Control-plane reads that tolerate replica lag (lab 6).
+
+    Falls back to the primary - never to an error - when the caller just wrote
+    (read-after-write), asked for ``strong``, or the standby is unreachable.
+    """
+    async with _replica_aware_session(request, user, primary) as session:
+        yield session
+
+
 ReadDatabaseSession = Annotated[AsyncSession, Depends(get_read_db)]
+
+
+async def get_shard_read_db(
+    request: Request,
+    user: CurrentUser,
+    profile: OwnProfile,
+    primary: DatabaseSession,
+) -> AsyncIterator[AsyncSession]:
+    """Data-plane reads for the caller's own clone.
+
+    Sharded: the owning shard's primary (the lab 6 replica belongs to the
+    control-plane database and does not hold shard data). Otherwise the lab 6
+    replica-aware path.
+    """
+    if router.sharded:
+        shard = router.shard_for(profile.id)
+        request.state.db_node = f"shard-{shard}"
+        async with router.session_for_shard(shard) as session:
+            yield session
+        return
+    async with _replica_aware_session(request, user, primary) as session:
+        yield session
+
+
+ShardReadSession = Annotated[AsyncSession, Depends(get_shard_read_db)]
+
+
+async def get_clone_shard_read_db(
+    profile_id: int,
+    request: Request,
+    user: CurrentUser,
+    primary: DatabaseSession,
+) -> AsyncIterator[AsyncSession]:
+    """Data-plane reads for *any* clone (operator tooling): routed by the
+    path's clone id instead of the caller's own profile."""
+    if router.sharded:
+        shard = router.shard_for(profile_id)
+        request.state.db_node = f"shard-{shard}"
+        async with router.session_for_shard(shard) as session:
+            yield session
+        return
+    async with _replica_aware_session(request, user, primary) as session:
+        yield session
+
+
+CloneShardReadSession = Annotated[AsyncSession, Depends(get_clone_shard_read_db)]

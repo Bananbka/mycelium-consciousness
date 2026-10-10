@@ -18,22 +18,25 @@ services:
       dockerfile: services/api/src/api/Dockerfile.api
     env_file:
       - .env
+    environment:
+      # Lab 7: the same revision runs on the control plane and on every shard.
+      MIGRATE_HOSTS: "db ${SHARD_HOSTS-shard-a shard-b}"
     depends_on:
       db:
         condition: service_healthy
+      shard-a:
+        condition: service_healthy
+      shard-b:
+        condition: service_healthy
     working_dir: /app
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - uv
-      - run
-      - --package
-      - api
-      - --frozen
-      - --no-sync
-      - alembic
-      - -c
-      - shared/alembic.ini
-      - upgrade
-      - head
+      - |
+        set -e
+        for host in $$MIGRATE_HOSTS; do
+          echo "migrating $$host"
+          POSTGRES_HOST="$$host" uv run --package api --frozen --no-sync             alembic -c shared/alembic.ini upgrade head
+        done
     restart: "no"
 
   api:
@@ -46,6 +49,9 @@ services:
     environment:
       # Lab 6: lag-tolerant reads go to the standby; empty = single node.
       POSTGRES_REPLICA_HOST: "${POSTGRES_REPLICA_HOST-db-replica}"
+      # Lab 7: data-plane shards; empty SHARD_NODES = single database.
+      SHARD_NODES: "${SHARD_NODES-a=shard-a:5432,b=shard-b:5432}"
+      SHARD_STRATEGY: "${SHARD_STRATEGY:-vbucket}"
     depends_on:
       db:
         condition: service_healthy
@@ -69,6 +75,9 @@ services:
     environment:
       SIMULATED_LATENCY_MS: "${SLOW_LATENCY_MS:-300}"
       POSTGRES_REPLICA_HOST: "${POSTGRES_REPLICA_HOST-db-replica}"
+      # Lab 7: data-plane shards; empty SHARD_NODES = single database.
+      SHARD_NODES: "${SHARD_NODES-a=shard-a:5432,b=shard-b:5432}"
+      SHARD_STRATEGY: "${SHARD_STRATEGY:-vbucket}"
     depends_on:
       db:
         condition: service_healthy
@@ -86,6 +95,10 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      # Lab 7: data-plane shards; empty SHARD_NODES = single database.
+      SHARD_NODES: "${SHARD_NODES-a=shard-a:5432,b=shard-b:5432}"
+      SHARD_STRATEGY: "${SHARD_STRATEGY:-vbucket}"
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +116,10 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      # Lab 7: data-plane shards; empty SHARD_NODES = single database.
+      SHARD_NODES: "${SHARD_NODES-a=shard-a:5432,b=shard-b:5432}"
+      SHARD_STRATEGY: "${SHARD_STRATEGY:-vbucket}"
     depends_on:
       db:
         condition: service_healthy
@@ -220,6 +237,33 @@ services:
       - postgres_replica_data:/var/lib/postgresql/data
       - ./postgres/replica-entrypoint.sh:/replica-entrypoint.sh:ro
 
+  # Lab 7: data-plane shards (memory_buffers / memory_backups). Identical
+  # schema on every node (the `migrate` job applies the same revision to each);
+  # which clone lives where is decided by shared.sharding, not by the database.
+  shard-a:
+    image: postgres:16-alpine
+    restart: always
+    environment: &shard_env
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-clone_memory_db}
+    healthcheck: &shard_health
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-clone_memory_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - shard_a_data:/var/lib/postgresql/data
+
+  shard-b:
+    image: postgres:16-alpine
+    restart: always
+    environment: *shard_env
+    healthcheck: *shard_health
+    volumes:
+      - shard_b_data:/var/lib/postgresql/data
+
   redis:
     image: redis:7-alpine
     container_name: clone_redis
@@ -261,5 +305,7 @@ services:
 volumes:
   postgres_data:
   postgres_replica_data:
+  shard_a_data:
+  shard_b_data:
   redis_data:
   minio_data:
