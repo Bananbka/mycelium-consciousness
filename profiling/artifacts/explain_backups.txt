@@ -1,0 +1,54 @@
+=== GET /memories/backups: newest 50 of one clone ===
+                                                                         QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=21.72..21.85 rows=50 width=58) (actual time=0.112..0.117 rows=50 loops=1)
+   Buffers: shared hit=21
+   InitPlan 1 (returns $0)
+     ->  Limit  (cost=0.00..0.02 rows=1 width=4) (actual time=0.004..0.004 rows=1 loops=1)
+           Buffers: shared hit=1
+           ->  Seq Scan on memory_backups memory_backups_1  (cost=0.00..28.00 rows=1300 width=4) (actual time=0.004..0.004 rows=1 loops=1)
+                 Buffers: shared hit=1
+   ->  Sort  (cost=21.70..21.83 rows=50 width=58) (actual time=0.111..0.113 rows=50 loops=1)
+         Sort Key: memory_backups.period_end DESC
+         Sort Method: quicksort  Memory: 31kB
+         Buffers: shared hit=21
+         ->  Bitmap Heap Scan on memory_backups  (cost=4.67..20.29 rows=50 width=58) (actual time=0.032..0.060 rows=50 loops=1)
+               Recheck Cond: (clone_id = $0)
+               Heap Blocks: exact=15
+               Buffers: shared hit=18
+               ->  Bitmap Index Scan on ix_memory_backups_clone_id_period_end  (cost=0.00..4.65 rows=50 width=0) (actual time=0.028..0.028 rows=50 loops=1)
+                     Index Cond: (clone_id = $0)
+                     Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=118
+ Planning Time: 1.472 ms
+ Execution Time: 0.267 ms
+(22 rows)
+
+=== the same without the composite index (hypothesis H-index) ===
+BEGIN
+DROP INDEX
+                                                                QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=32.68..32.81 rows=50 width=58) (actual time=0.109..0.116 rows=50 loops=1)
+   Buffers: shared hit=16
+   InitPlan 1 (returns $0)
+     ->  Limit  (cost=0.00..0.02 rows=1 width=4) (actual time=0.002..0.003 rows=1 loops=1)
+           Buffers: shared hit=1
+           ->  Seq Scan on memory_backups memory_backups_1  (cost=0.00..28.00 rows=1300 width=4) (actual time=0.002..0.002 rows=1 loops=1)
+                 Buffers: shared hit=1
+   ->  Sort  (cost=32.66..32.79 rows=50 width=58) (actual time=0.108..0.111 rows=50 loops=1)
+         Sort Key: memory_backups.period_end DESC
+         Sort Method: quicksort  Memory: 31kB
+         Buffers: shared hit=16
+         ->  Seq Scan on memory_backups  (cost=0.00..31.25 rows=50 width=58) (actual time=0.010..0.083 rows=50 loops=1)
+               Filter: (clone_id = $0)
+               Rows Removed by Filter: 1250
+               Buffers: shared hit=16
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.196 ms
+ Execution Time: 0.153 ms
+(19 rows)
+
+ROLLBACK

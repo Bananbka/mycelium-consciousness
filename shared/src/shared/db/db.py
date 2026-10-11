@@ -16,6 +16,11 @@ POOL_RECYCLE_SECONDS = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 # Bounds how long a request waits on an unreachable node before the routing
 # layer fails over (lab 6); asyncpg's own default is 60s.
 CONNECT_TIMEOUT_SECONDS = float(os.getenv("DB_CONNECT_TIMEOUT", "3"))
+# Lab 9: pre-ping spends a BEGIN/ROLLBACK round trip on *every* checkout. The
+# profile showed it as one of five round trips behind a request that needs one,
+# so it is off by default; a dead connection is invalidated on first use and
+# surfaces as a 503 (lab 6 handler) instead of being probed ahead of time.
+POOL_PRE_PING = os.getenv("DB_POOL_PRE_PING", "0") == "1"
 
 DATABASE_URL = (
     f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
@@ -43,7 +48,7 @@ engine = create_async_engine(
     DATABASE_URL,
     pool_size=POOL_SIZE,
     max_overflow=MAX_OVERFLOW,
-    pool_pre_ping=True,
+    pool_pre_ping=POOL_PRE_PING,
     pool_recycle=POOL_RECYCLE_SECONDS,
     connect_args={"timeout": CONNECT_TIMEOUT_SECONDS},
     echo=False,
@@ -54,7 +59,7 @@ replica_engine = (
         REPLICA_DATABASE_URL,
         pool_size=REPLICA_POOL_SIZE,
         max_overflow=MAX_OVERFLOW,
-        pool_pre_ping=True,
+        pool_pre_ping=POOL_PRE_PING,
         pool_recycle=POOL_RECYCLE_SECONDS,
         connect_args={"timeout": CONNECT_TIMEOUT_SECONDS},
         echo=False,

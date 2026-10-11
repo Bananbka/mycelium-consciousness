@@ -85,6 +85,9 @@ export function run(data) {
     fanOut(data);
   } else if (SCENARIO === 'B') {
     writeMemory(data);
+  } else if (SCENARIO === 'P') {   // lab 9: one GET, path chosen by -e PATH_UNDER_TEST
+    const r = http.get(`${BASE}${__ENV.PATH_UNDER_TEST}`, headers(data));
+    check(r, { 'probe 200': (x) => x.status === 200 });
   } else {
     http.get(`${BASE}/profiles/me`, headers(data));   // read context
     for (let i = 0; i < 3; i++) writeMemory(data);    // write

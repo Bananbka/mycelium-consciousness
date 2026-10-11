@@ -21,6 +21,7 @@ and restore.
 | 6 | Database replication, read/write separation | [Lab 6](#lab-6--database-replication-and-readwrite-separation) |
 | 7 | Sharding, partitioning, resharding | [Lab 7](#lab-7--data-scaling-sharding-and-partitioning) |
 | 8 | Resilience: stampede, avalanche, penetration | [Lab 8](#lab-8--resilience-engineering-cache-stampede-avalanche-and-penetration) |
+| 9 | Performance profiling, bottleneck diagnostics | [Lab 9](#lab-9--performance-profiling-and-bottleneck-diagnostics), [`profiling/`](profiling/README.md) |
 
 ## Architecture
 
@@ -1471,3 +1472,46 @@ in [docs/resilience-profile.md](docs/resilience-profile.md).
 Reproduce: `docker compose -f infra/docker-compose.yaml up -d --build`, then
 `ALLOW_PROTECTION_OVERRIDE=1 LEADERBOARD_TTL_SECONDS=10 docker compose ... up -d api`
 and `scripts/stampede_experiments.sh {seed|stampede|avalanche|penetration}`.
+
+## Lab 9 — Performance profiling and bottleneck diagnostics
+
+Full write-up, artifacts and reproduction: [`profiling/README.md`](profiling/README.md)
+(flame graphs `profiling/artifacts/*.svg`, `EXPLAIN ANALYZE` traces, statement
+log, raw k6 exports `load-tests/results/l9_*`).
+
+**Symptom.** Throughput flat at ~250–300 RPS, API containers at ~200 % CPU,
+Postgres at ~43 % (lab 5; unchanged by labs 6–8).
+
+**Hypotheses and verdicts.**
+
+| | Hypothesis | Verdict | Evidence |
+| --- | --- | --- | --- |
+| H1 | JWT / Pydantic / serialisation | refuted | 1.6 % / 1.3 % of py-spy samples |
+| H2 | slow or unindexed SQL | refuted | every statement 0.04–0.27 ms, index scans |
+| H3 | middleware + Redis | refuted as main cause | no-I/O probe: 1323 RPS; Redis ping: 1296 RPS |
+| H4 | database round trips per request | **confirmed** | `SELECT 1` probe halves throughput (1296 → 648); 6 statements per request, 2 useful; SQLAlchemy = 36.6 % of samples |
+
+**Root cause.** `pool_pre_ping=True` (a `BEGIN; ROLLBACK;` on every checkout)
+plus `selectinload(User.profile)` (a second statement for a one-to-one row):
+five round trips for two useful statements on every authenticated request.
+
+**Optimisation.** `joinedload` in the auth dependency; `pool_pre_ping` off by
+default (`DB_POOL_PRE_PING=1` to restore).
+
+| Metric (100 VUs) | Baseline | Optimised | Δ |
+| --- | --- | --- | --- |
+| Write RPS (B) | 283 | 384 | **+36 %** |
+| Write p95 / p99 ms | 283 / 364 | 214 / 268 | −24 % / −26 % |
+| Read RPS (A, cache bypassed) | 198 | 261 | +31 % |
+| Read p95 / p99 ms | 513 / 705 | 415 / 591 | −19 % / −16 % |
+| Workflow RPS (C) | 283 | 384 | +36 % |
+| Error rate | 0 % | 0 % | — |
+| API CPU per write request | ≈14.5 ms | ≈10.8 ms | −26 % |
+| Postgres CPU | 43 % | 35 % | −8 pp |
+
+**Trade-offs.** With pre-ping off a connection the server dropped is found on
+first use; `pool_recycle` bounds the age and the lab 6 503/standby fallback
+handles the failure (after terminating all 41 backends, 12/12 requests were
+still answered — no guarantee for one caught mid-query). One run per point on a
+shared laptop: differences below ~10 % are noise; the +26…36 % holds across all
+nine points. What remains is documented in `profiling/README.md` §9.

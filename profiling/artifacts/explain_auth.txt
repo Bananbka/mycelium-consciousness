@@ -1,0 +1,45 @@
+=== auth: user by primary key (+ profile by unique user_id) ===
+                                                                    QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join  (cost=0.29..16.34 rows=1 width=35) (actual time=0.066..0.067 rows=1 loops=1)
+   Buffers: shared hit=4
+   ->  Index Scan using users_pkey on users u  (cost=0.14..8.16 rows=1 width=31) (actual time=0.031..0.031 rows=1 loops=1)
+         Index Cond: (id = 1)
+         Buffers: shared hit=2
+   ->  Index Scan using uq_clone_profiles_user_id on clone_profiles p  (cost=0.15..8.17 rows=1 width=8) (actual time=0.031..0.031 rows=1 loops=1)
+         Index Cond: (user_id = 1)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=259
+ Planning Time: 3.620 ms
+ Execution Time: 0.188 ms
+(12 rows)
+
+=== auth, as issued by selectinload: two statements ===
+                                                     QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------
+ Index Scan using users_pkey on users  (cost=0.14..8.16 rows=1 width=137) (actual time=0.014..0.015 rows=1 loops=1)
+   Index Cond: (id = 1)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=32
+ Planning Time: 0.696 ms
+ Execution Time: 0.041 ms
+(7 rows)
+
+                                                                QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using uq_clone_profiles_user_id on clone_profiles  (cost=0.15..8.17 rows=1 width=84) (actual time=0.022..0.022 rows=1 loops=1)
+   Index Cond: (user_id = 1)
+   Buffers: shared hit=2
+ Planning Time: 0.052 ms
+ Execution Time: 0.044 ms
+(5 rows)
+
+=== pre-ping / SELECT 1 for scale ===
+                                     QUERY PLAN
+------------------------------------------------------------------------------------
+ Result  (cost=0.00..0.01 rows=1 width=4) (actual time=0.002..0.002 rows=1 loops=1)
+ Planning Time: 0.008 ms
+ Execution Time: 0.006 ms
+(3 rows)

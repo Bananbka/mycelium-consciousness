@@ -1,0 +1,7 @@
+# one authenticated request (GET /_prof/auth) as seen by Postgres, log_statement=all, 3 statements are useful work
+[1132] LOG:  statement: BEGIN;
+[1132] LOG:  statement: ROLLBACK;
+[1132] LOG:  statement: BEGIN;
+[1132] LOG:  execute __asyncpg_stmt_74__: SELECT users.id, users.email, users.password_hash, users.role, users
+[1132] LOG:  execute __asyncpg_stmt_7b__: SELECT clone_profiles.user_id AS clone_profiles_user_id, clone_profi
+[1132] LOG:  statement: ROLLBACK;

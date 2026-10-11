@@ -56,6 +56,10 @@ services:
       PENETRATION_GUARD: "${PENETRATION_GUARD:-both}"
       ALLOW_PROTECTION_OVERRIDE: "${ALLOW_PROTECTION_OVERRIDE:-0}"
       LEADERBOARD_SIMULATED_QUERY_MS: "${LEADERBOARD_SIMULATED_QUERY_MS:-0}"
+      # Lab 9: mounts the /_prof/* layer-isolation probes (never in production).
+      PROFILING_ENDPOINTS: "${PROFILING_ENDPOINTS:-0}"
+      # Lab 9: probe every pooled connection on checkout (extra round trip).
+      DB_POOL_PRE_PING: "${DB_POOL_PRE_PING:-0}"
       # Lab 7: data-plane shards; empty SHARD_NODES = single database.
       SHARD_NODES: "${SHARD_NODES-a=shard-a:5432,b=shard-b:5432}"
       SHARD_STRATEGY: "${SHARD_STRATEGY:-vbucket}"

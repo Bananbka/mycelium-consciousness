@@ -1,0 +1,4 @@
+# Sidecar that attaches to a running api container (shared PID namespace), so
+# the application image itself needs no profiler and no extra capabilities.
+FROM python:3.12-slim
+RUN pip install --no-cache-dir py-spy==0.4.2

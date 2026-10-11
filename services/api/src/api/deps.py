@@ -9,7 +9,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
 from api.security import decode_access_token
 from shared import consistency
@@ -39,8 +39,10 @@ UNAUTHORIZED = HTTPException(
 
 
 async def _load_user(db: AsyncSession, user_id: int) -> User | None:
+    # One statement: ``selectinload`` costs a second round trip per request
+    # (lab 9), ``joinedload`` folds the one-to-one profile into the same query.
     result = await db.execute(
-        select(User).options(selectinload(User.profile)).where(User.id == user_id)
+        select(User).options(joinedload(User.profile)).where(User.id == user_id)
     )
     return result.scalar_one_or_none()
 

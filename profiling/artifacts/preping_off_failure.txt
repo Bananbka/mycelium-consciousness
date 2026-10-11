@@ -1,0 +1,5 @@
+      6 write: 202
+      6 HTTP/1.1 200 OK x-db-node: primary
+# all 41 backends of the primary were terminated (pg_terminate_backend) right before
+# each batch; with DB_POOL_PRE_PING=0 every request was still answered (asyncpg sees
+# the closed socket and SQLAlchemy reconnects), none surfaced as 503.

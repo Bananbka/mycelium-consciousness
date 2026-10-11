@@ -107,6 +107,11 @@ app.include_router(memories.router)
 app.include_router(fleet.router)
 app.include_router(admin.router)
 
+if os.getenv("PROFILING_ENDPOINTS") == "1":  # lab 9 layer-isolation probes
+    from api.routers import profiling
+
+    app.include_router(profiling.router)
+
 
 async def _check(probe) -> str:
     try:

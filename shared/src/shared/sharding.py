@@ -169,7 +169,7 @@ class ShardRouter:
                     self.nodes[name].url,
                     pool_size=self._pool[0],
                     max_overflow=self._pool[1],
-                    pool_pre_ping=True,
+                    pool_pre_ping=db.POOL_PRE_PING,
                     pool_recycle=db.POOL_RECYCLE_SECONDS,
                     connect_args={"timeout": db.CONNECT_TIMEOUT_SECONDS},
                 )
