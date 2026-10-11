@@ -176,7 +176,7 @@ class ShardRouter:
                 self._engines.append(engine)
                 self._makers[name] = async_sessionmaker(
                     bind=engine,
-                    class_=AsyncSession,
+                    class_=db.TolerantSession,
                     expire_on_commit=False,
                     autoflush=False,
                 )

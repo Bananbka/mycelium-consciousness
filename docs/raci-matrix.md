@@ -25,6 +25,7 @@ Informed (інформується про результат).
 | Шардинг data plane: Shard Router, vbuckets, міграція на шарди, моделі решардингу (`shared/sharding.py`, `tools/shard_*.py`, lab 7) | C | R, A |
 | Захист кешу від stampede/avalanche/penetration, Bloom filter, Resilience Profile (`shared/guarded_cache.py`, `shared/bloom.py`, `api/routers/fleet.py`, `docs/resilience-profile.md`, lab 8) | C | R, A |
 | Профілювання та точкова оптимізація: py-spy, EXPLAIN ANALYZE, шарова декомпозиція, A/B-звіт (`profiling/`, `api/routers/profiling.py`, lab 9) | C | R, A |
+| Фінальна архітектурна ревізія: C4, baseline vs final, відмови під навантаженням, SPOF, консистентність (`docs/final-architecture.md`, `scripts/failure_scenarios.sh`, lab 10) | C | R, A |
 | Контейнеризація (Dockerfile'и сервісів, `docker-compose.yaml`, мережі й volumes) | I | R, A |
 | Reverse proxy та балансування навантаження (`infra/nginx/default.conf.template`) | I | R, A |
 | CI/CD pipeline (`.github/workflows/ci.yaml`) | I | R, A |

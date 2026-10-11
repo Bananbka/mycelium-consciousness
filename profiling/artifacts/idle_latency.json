@@ -1,0 +1,62 @@
+{
+  "nginx:80": {
+    "noop (framework + middleware)": {
+      "p50": 0.8,
+      "p95": 1.15
+    },
+    "+ redis ping": {
+      "p50": 1.1,
+      "p95": 1.92
+    },
+    "+ db checkout + SELECT 1": {
+      "p50": 1.85,
+      "p95": 2.49
+    },
+    "+ JWT + user/profile lookup": {
+      "p50": 2.95,
+      "p95": 3.79
+    },
+    "POST /memories/write": {
+      "p50": 3.85,
+      "p95": 4.47
+    },
+    "GET /memories/backups (cache HIT)": {
+      "p50": 4.48,
+      "p95": 6.97
+    },
+    "GET /memories/backups (cache BYPASS)": {
+      "p50": 5.41,
+      "p95": 8.08
+    }
+  },
+  "lab9-api-1:8000": {
+    "noop (framework + middleware)": {
+      "p50": 0.5,
+      "p95": 0.63
+    },
+    "+ redis ping": {
+      "p50": 0.77,
+      "p95": 0.95
+    },
+    "+ db checkout + SELECT 1": {
+      "p50": 1.18,
+      "p95": 1.57
+    },
+    "+ JWT + user/profile lookup": {
+      "p50": 2.01,
+      "p95": 2.84
+    },
+    "POST /memories/write": {
+      "p50": 3.06,
+      "p95": 4.5
+    },
+    "GET /memories/backups (cache HIT)": {
+      "p50": 2.98,
+      "p95": 4.35
+    },
+    "GET /memories/backups (cache BYPASS)": {
+      "p50": 4.78,
+      "p95": 6.38
+    }
+  }
+}

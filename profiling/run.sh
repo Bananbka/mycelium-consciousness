@@ -3,6 +3,7 @@
 #   profiling/run.sh layers          # RPS ladder: noop -> redis -> db -> auth -> write (cost per layer)
 #   profiling/run.sh spy B <tag>     # scenario B under load + py-spy raw/flamegraph into profiling/artifacts
 #   profiling/run.sh ab <tag>        # scenarios A/B/C at 10/50/100 VUs -> load-tests/results/l9_<tag>_*.json
+#   profiling/run.sh matrix <tag>    # lab 10: lab 5 profile (cache on) A/B/C x 10/50/100/200 VUs -> l10_<tag>_*
 #   profiling/run.sh explain         # EXPLAIN (ANALYZE, BUFFERS) of the hot statements
 # COMPOSE, NETWORK, ENV_FILE, API (container to attach py-spy to) as in run_load_tests.sh.
 export MSYS_NO_PATHCONV=1
@@ -30,7 +31,7 @@ k6run() { # name scenario vus [extra -e args]
 spy() { # file-stem seconds-after-start
   local stem="$1" delay="$2" pid
   sleep "$delay"
-  pid=$(docker run --rm --pid=container:"$API" lab9-pyspy sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline | grep -q "bin/api" && echo $(basename $p) && break; done')
+  pid=$(docker run --rm --pid=container:"$API" lab9-pyspy sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline | grep -q "bin/ap[i]" && echo $(basename $p) && break; done')
   for fmt in raw flamegraph; do
     ext=$([ $fmt = raw ] && echo txt || echo svg)
     docker run --rm --pid=container:"$API" --cap-add SYS_PTRACE -v "$PWD/$OUT:/out" lab9-pyspy \
@@ -55,6 +56,13 @@ ab)
   for scen in A B C; do for v in 10 50 100; do
     k6run "l9_${tag}_${scen}_${v}" "$scen" "$v" -e NOCACHE=1
   done; done ;;
+matrix)   # lab 10: the lab 5 load profile (cache ON), A/B/C x VUs, 30 s each
+  tag="${2:?tag}"
+  for scen in A B C; do for v in ${LEVELS:-10 50 100 200}; do
+    DURATION="${DURATION:-30s}" k6run "l10_${tag}_${scen}_${v}" "$scen" "$v"
+  done; done ;;
+one)      # lab 10: one run, any scenario: run.sh one <name> <scenario> <vus>
+  DURATION="${DURATION:-30s}" k6run "l10_${2:?name}" "${3:?scenario}" "${4:?vus}" ;;
 explain)
   $C exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f - < profiling/explain.sql ;;
 esac

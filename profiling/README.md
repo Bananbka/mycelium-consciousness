@@ -145,7 +145,7 @@ pre-ping adds the rest.
 
 | Change | Cost | Mitigation / check |
 | --- | --- | --- |
-| pre-ping off | a connection the server silently dropped is discovered on first use instead of at checkout, so one request can fail | `pool_recycle=1800`; the lab 6 handler turns connectivity errors into 503 (reads fall back to the standby); control `artifacts/preping_off_failure.txt`: after `pg_terminate_backend` of all 41 backends, 12/12 requests were still answered. Not a guarantee for a request caught mid-query |
+| pre-ping off | a connection the server silently dropped is discovered on first use instead of at checkout, so one request can fail | `pool_recycle=1800`; the lab 6 handler turns connectivity errors into 503 (reads fall back to the standby); control `artifacts/preping_off_failure.txt`: after `pg_terminate_backend` of all 41 backends, 12/12 requests were still answered. **That check was too weak:** stopping the primary under 50 concurrent VUs (lab 10) exposed unhandled `InternalClientError` / `ConnectionDoesNotExistError` on dead pooled connections and a failing `session.close()` — fixed in lab 10 (`TolerantSession`, wider 503 handler, `docs/final-architecture.md` §6) |
 | `joinedload` | the profile row is read even where only `users` is needed (admin routes: LEFT JOIN against nothing), the row is wider | identical semantics, 195 tests pass; the join executes in 0.19 ms vs 0.04 + 0.04 ms for two statements — the saving is round trips, not execution time |
 | `/_prof/*` probes | an unauthenticated no-op endpoint | mounted only with `PROFILING_ENDPOINTS=1`, hidden from the schema, default `0` |
 | py-spy sidecar | sampling overhead (a few %), `SYS_PTRACE` on a throw-away container | api image untouched |

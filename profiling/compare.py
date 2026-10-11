@@ -7,15 +7,18 @@ python profiling/compare.py base join opt       # every step in one table
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
+PREFIX = os.getenv("PREFIX", "l9")
+LEVELS = tuple(int(v) for v in os.getenv("LEVELS", "10,50,100").split(","))
 RES = Path(__file__).resolve().parent.parent / "load-tests" / "results"
 
 
 def load(tag: str, scen: str, vus: int) -> dict | None:
-    f = RES / f"l9_{tag}_{scen}_{vus}.json"
+    f = RES / f"{PREFIX}_{tag}_{scen}_{vus}.json"
     if not f.exists():
         return None
     m = json.loads(f.read_text())["metrics"]
@@ -23,7 +26,7 @@ def load(tag: str, scen: str, vus: int) -> dict | None:
     reqs = m.get("http_reqs{phase:main}", m["http_reqs"])
     failed = m.get("http_req_failed{phase:main}", m.get("http_req_failed", {}))
     cpu = {}
-    stats = RES / f"l9_{tag}_{scen}_{vus}.stats"
+    stats = RES / f"{PREFIX}_{tag}_{scen}_{vus}.stats"
     if stats.exists():
         for line in stats.read_text().splitlines():
             mm = re.match(r"(\S+) cpu=([\d.]+)%", line)
@@ -61,7 +64,7 @@ def main(tags: list[str]) -> None:
     )
     print("|" + " --- |" * (4 + 3 * len(tags) + len(tags) + 1))
     for scen in "ABC":
-        for vus in (10, 50, 100):
+        for vus in LEVELS:
             rows = [load(t, scen, vus) for t in tags]
             if not all(rows):
                 continue

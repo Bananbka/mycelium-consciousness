@@ -1,6 +1,9 @@
+import logging
 import os
 from collections.abc import AsyncIterator
 
+import asyncpg.exceptions as pg_exc
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -40,8 +43,35 @@ REPLICA_DATABASE_URL = (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class Base(DeclarativeBase):
     pass
+
+
+class TolerantSession(AsyncSession):
+    """``close()`` that survives a connection lost mid-request (lab 10).
+
+    Closing rolls the transaction back on the wire. When the node just went
+    away that rollback raises - and because it runs in the dependency's
+    teardown, *after* the response was produced, nothing can turn it into a
+    503: the exception escapes the ASGI app and the connection towards nginx is
+    reset, which nginx counts as an upstream failure. The pool invalidates the
+    broken connection itself, so swallowing the error here loses nothing.
+    """
+
+    async def close(self) -> None:
+        try:
+            await super().close()
+        except (
+            DBAPIError,
+            pg_exc.PostgresConnectionError,
+            pg_exc.InterfaceError,
+            pg_exc.InternalClientError,
+            OSError,
+        ):
+            logger.warning("session close failed, connection discarded", exc_info=True)
 
 
 engine = create_async_engine(
@@ -70,7 +100,7 @@ replica_engine = (
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
-    class_=AsyncSession,
+    class_=TolerantSession,
     expire_on_commit=False,
     autoflush=False,
 )
@@ -79,7 +109,7 @@ AsyncSessionLocal = async_sessionmaker(
 ReplicaSessionLocal = (
     async_sessionmaker(
         bind=replica_engine,
-        class_=AsyncSession,
+        class_=TolerantSession,
         expire_on_commit=False,
         autoflush=False,
     )

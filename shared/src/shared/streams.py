@@ -13,13 +13,23 @@ STREAM_KEY_PREFIX = "clone-stream:"
 # that one clone instead of silently discarding anything.
 MEMORY_STREAM_MAXLEN = int(os.getenv("MEMORY_STREAM_MAXLEN", "10000"))
 
+CONNECT_TIMEOUT_SECONDS = float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "1"))
+SOCKET_TIMEOUT_SECONDS = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "2"))
+
 _client: redis.Redis | None = None
 
 
 def get_redis() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.from_url(REDIS_URL, decode_responses=True)
+        # Bounded waits (lab 10): with Redis down a write otherwise hangs for
+        # seconds in connect retries, holding a worker slot the whole time.
+        _client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=SOCKET_TIMEOUT_SECONDS,
+        )
     return _client
 
 
@@ -32,8 +42,12 @@ async def append_memory(
 ) -> tuple[str, int]:
     client = get_redis()
     key = stream_key(clone_id)
-    entry_id = await client.xadd(key, {"content": content, "captured_at": captured_at})
-    length = await client.xlen(key)
+    # One round trip for both commands (lab 10); not a transaction - the
+    # length is only a trigger for the out-of-band flush, never exact.
+    async with client.pipeline(transaction=False) as pipe:
+        pipe.xadd(key, {"content": content, "captured_at": captured_at})
+        pipe.xlen(key)
+        entry_id, length = await pipe.execute()
     return entry_id, length
 
 

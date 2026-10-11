@@ -22,6 +22,7 @@ and restore.
 | 7 | Sharding, partitioning, resharding | [Lab 7](#lab-7--data-scaling-sharding-and-partitioning) |
 | 8 | Resilience: stampede, avalanche, penetration | [Lab 8](#lab-8--resilience-engineering-cache-stampede-avalanche-and-penetration) |
 | 9 | Performance profiling, bottleneck diagnostics | [Lab 9](#lab-9--performance-profiling-and-bottleneck-diagnostics), [`profiling/`](profiling/README.md) |
+| 10 | Final optimisation, architecture review | [Lab 10](#lab-10--final-optimisation-and-architecture-review), [`docs/final-architecture.md`](docs/final-architecture.md) |
 
 ## Architecture
 
@@ -1515,3 +1516,87 @@ handles the failure (after terminating all 41 backends, 12/12 requests were
 still answered — no guarantee for one caught mid-query). One run per point on a
 shared laptop: differences below ~10 % are noise; the +26…36 % holds across all
 nine points. What remains is documented in `profiling/README.md` §9.
+
+## Lab 10 — Final optimisation and architecture review
+
+Full write-up (C4 diagram, request flow with latencies, attribution, SPOFs,
+consistency, cost of complexity, final summary card):
+[`docs/final-architecture.md`](docs/final-architecture.md). Raw data:
+`load-tests/results/l10_*`; scripts: `profiling/run.sh matrix|one`,
+`scripts/failure_scenarios.sh`, `profiling/final_table.py`,
+`profiling/failure_table.py`.
+
+![Final C4 container diagram](docs/media/c4-final.png)
+
+### Baseline vs final (lab 5 profile, 100 VUs, 3 interleaved rounds)
+
+`base5` is the code of branch `alt-5`, started next to the final stack and
+loaded in alternation with it, so both see the same machine state.
+
+| Metric | Scenario | Lab 5 baseline | Final | Change |
+| --- | --- | --- | --- | --- |
+| Stable throughput, RPS | A read / B write / C workflow | 336 / 332 / 330 | 388 / 381 / 398 | **+15 % / +15 % / +21 %** |
+| p50, ms | A / B / C | 113 / 167 / 152 | 104 / 152 / 145 | −8 % / −9 % / −5 % |
+| p95, ms | A / B / C | 513 / 332 / 421 | 420 / 246 / 273 | −18 % / −26 % / −35 % |
+| p99 tail, ms | A / B / C | 835 / 449 / 626 | 675 / 308 / 363 | −19 % / −31 % / −42 % |
+| Error rate at saturation (200 VUs) | A / B / C | 0 % | 0 % | — |
+| Saturation threshold | all | ≈10 VUs | ≈10 VUs | unchanged |
+
+A separate 10/50/100/200-VU matrix taken minutes apart showed a larger gap
+(+50…96 % RPS), but re-running the same final build an hour later gave
+350–390 RPS instead of 450–520: session-to-session drift on this laptop is
+about as large as the effect, so the interleaved rounds are the evidence and
+the matrix only shows the shape (flat plateau from ~10 VUs, 0 % errors).
+
+### Attribution
+
+| Change | Measured effect |
+| --- | --- |
+| Horizontal scaling (api ×1/×2/×4) | 388 → 618 → 821 RPS (B, 100 VUs); host-CPU bound beyond 2 |
+| Cache (lab 4) | −83 % table reads, +15 % RPS on A |
+| Replica (lab 6) | no RPS change; keeps reads available when the primary is down |
+| Shards (lab 7) | no RPS change; full topology is 6–18 % slower than one Postgres on this host |
+| Stampede protection (lab 8) | invisible in steady state; 17.6 % → 0 % errors under a stampede |
+| Round-trip removal (lab 9) | +26…36 % RPS, p95 −11…−35 % |
+| Robustness fixes (lab 10) | throughput unchanged (−8…+5 %, noise); primary-down errors 75–94 % → 2–5 % |
+
+Net +15…21 % is smaller than lab 9's own +26…36 % because labs 6–8 add
+per-request overhead (read routing, shard router, guarded cache).
+
+### What the failure run found
+
+Stopping components under 50 VUs (`scripts/failure_scenarios.sh`) showed that
+the lab 6 read-only mode did not survive load: with the primary down, 75–94 %
+of requests failed. Causes, all fixed: nginx counted an application 503 as an
+upstream failure (`proxy_next_upstream … http_503` + `max_fails=3` took both
+instances out of rotation), driver errors on dead pooled connections and a
+failing `session.close()` escaped as 500/connection reset, and a Redis outage
+under a mixed workload did the same (71 % errors). After the fixes: primary
+down → reads 0–2 % errors, writes 503; Redis down → reads 0 %, writes 503
+within ≈1 s; one api instance down → 0 %; shard-b down → only its clones'
+uncached reads fail (1.7 %). Still open: no breaker for a dead primary (p99
+≈3 s), no write buffer without Redis, `max_connections=100` vs per-process
+pools at ≥4 instances.
+
+### Final system engineering summary
+
+```
+=== FINAL SYSTEM ENGINEERING SUMMARY ===
+Architecture Style:    Stateless FastAPI instances behind nginx; Redis Streams write buffer;
+                       Celery rollup to S3; control plane (primary + replica) and data plane
+                       sharded by clone_id over 2 shards (1024 virtual buckets)
+Primary Workload Type: Write-heavy ingest + small cached reads (mixed)
+Stable Throughput:     ~380-400 RPS at 100 VUs (2 api x 2 workers, shared 12-vCPU laptop)
+p95 / p99 Latencies:   100 VUs: 246-420 / 308-675 ms; 10 VUs: 16-19 / 21-25 ms
+Saturation Point:      ~10 VUs (flat to 200, 0 % errors)
+Main Bottleneck:       API worker CPU (~200 % per container); next: Postgres connection
+                       budget and the control-plane primary (auth lookup on every request)
+Resilience Strategy:   Replica breaker + primary fallback, read-only degraded mode,
+                       single-flight + lock + SWR, Bloom + negative cache, TTL jitter,
+                       bounded timeouts with 503, nginx failover
+Consistency Model:     Strong for auth and writes; read-your-own-writes (5 s);
+                       eventual for replica/cache reads; buffered-eventual for memories
+Identified SPOFs:      nginx, Postgres primary, Redis, MinIO, celery-beat, shard primaries
+Next Scaling Step:     PgBouncer + smaller pools, cached auth identity, Redis Sentinel,
+                       Patroni, more api hosts
+```

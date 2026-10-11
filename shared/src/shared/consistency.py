@@ -18,7 +18,8 @@ import os
 import socket
 import time
 
-from sqlalchemy.exc import InterfaceError, OperationalError
+import asyncpg.exceptions as pg_exc
+from sqlalchemy.exc import DBAPIError, InterfaceError, InternalError, OperationalError
 
 from shared import cache
 
@@ -35,13 +36,24 @@ KEY_VERSION = "v1"
 
 # Raised by the driver when a node is unreachable. asyncpg connect failures
 # surface as plain OSError subclasses; failures on an established connection
-# are wrapped by SQLAlchemy.
+# are wrapped by SQLAlchemy. ``InternalError`` is what asyncpg's "cannot switch
+# to state N; another operation is in progress" becomes: the client-side
+# symptom of several requests discovering the same dead pooled connection at
+# once (lab 10 saw it when the primary was stopped with pre-ping off).
 CONNECTIVITY_ERRORS: tuple[type[BaseException], ...] = (
     ConnectionError,
     socket.gaierror,
     TimeoutError,
     OperationalError,
     InterfaceError,
+    InternalError,
+    # raised unwrapped while *connecting* ("the database system is shutting
+    # down") or surfacing as a bare DBAPIError when an established connection
+    # is closed in the middle of an operation
+    DBAPIError,
+    pg_exc.PostgresConnectionError,
+    pg_exc.CannotConnectNowError,
+    pg_exc.InterfaceError,
 )
 
 
