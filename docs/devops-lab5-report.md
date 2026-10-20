@@ -214,6 +214,8 @@ ID  DATE                            REVISION
 5   2026-10-21 02:38:25 +0300 EEST  main (c841470)    # відкат
 ```
 
+![Після git revert: Synced to c841470, Healthy, зламаний ReplicaSet прибрано](media/lab5-after-revert-healthy.png)
+
 `argocd app rollback` тут не використовувався: він працює лише з вимкненою
 автосинхронізацією, інакше Argo CD одразу повернув би стан із Git.
 
