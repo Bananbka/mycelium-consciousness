@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from api import observability
 from api.config import validate_jwt_secret
 from api.deps import DatabaseSession
 from api.routers import admin, auth, home, memories, profiles
@@ -29,6 +30,7 @@ app.include_router(home.router)
 app.include_router(profiles.router)
 app.include_router(memories.router)
 app.include_router(admin.router)
+observability.install(app)
 
 
 @app.get("/health", tags=["health"])

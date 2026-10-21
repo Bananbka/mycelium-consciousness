@@ -12,4 +12,6 @@ def main() -> None:
         reload=reload,
         workers=None if reload else int(os.getenv("API_WORKERS", "2")),
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        # Requests are logged as JSON by api.observability instead.
+        access_log=False,
     )
