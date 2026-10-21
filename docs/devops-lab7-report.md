@@ -86,7 +86,10 @@ http_request_duration_seconds_count{route="/version"} 3.0
 [`templates/servicemonitor.yaml`](https://github.com/Bananbka/mycelium-gitops/blob/main/charts/clone-factory/templates/servicemonitor.yaml)
 скрейпить іменований порт `http` Service API кожні 15 с. Прапор увімкнено окремим
 комітом `02ef055`, коли CRD вже існували. Після цього метрики `http_requests_total`
-з'явилися в Prometheus і на дашборді (п. 4–5).
+з'явилися в Prometheus і на дашборді (п. 4–5). Prometheus → Status → Targets: усі п'ять подів API
+у стані **UP**.
+
+![Prometheus Targets: serviceMonitor/clone-gitops/clone-factory-api/0, 5/5 up](media/lab7-prometheus-targets-up.png)
 
 ## 3. Логи
 
@@ -239,7 +242,11 @@ clone-factory-api-75ff46f88f-6jlb4   90.6
 
 ![Дашборд під час поганого релізу: частка 5xx ~10%, помилки лише з одного пода, JSON-логи помилок із Loki](media/lab7-dashboard-bad-release.png)
 
-Відкат завершено через Git:
+Відкат завершено через Git. Дерево застосунку в Argo CD після відкату: видно ConfigMap дашборда,
+`AnalysisTemplate` і два `AnalysisRun` (успішний і невдалий, із червоним серцем):
+
+![Argo CD: Synced / Healthy після відкату, дерево з AnalysisTemplate і AnalysisRun](media/lab7-argocd-tree-analysisrun.png)
+
 
 ```
 > git revert --no-edit HEAD; git push
@@ -264,6 +271,11 @@ Rollout: ✔ Healthy, Step 5/5, 1.6.0 (stable), Ready 5/5
 > curl http://localhost:19090/api/v1/alerts
 CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 ```
+
+Правило завантажене з ConfigMap чарту (група `clone-factory`); на скріншоті після відкату воно
+`Inactive`:
+
+![Prometheus Alerts: правило CloneFactoryHighErrorRate із чарту](media/lab7-prometheus-alert-rule.png)
 
 ## 7. Проблеми, які виникли по дорозі
 
@@ -296,7 +308,8 @@ CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 | 6. Відкат за метриками | `AnalysisTemplate` (95%), canary з кроком `analysis`, `FAIL_RATE=0.5` → `AnalysisRun Failed` → автоматичний abort → `Synced` + `Degraded`, 5xx і логи лише з нового пода, `git revert` → `Healthy` |
 | 6д*. Алерт | `PrometheusRule`: `pending`, до `Firing` не встиг через швидкий abort |
 
-**Що додати зі скріншотів (виконати в UI):** Prometheus → Status → Targets (ціль UP);
-Grafana Explore з логами 5xx; Argo CD з AnalysisRun `Failed` і статусом `Synced` / `Degraded`; Prometheus → Alerts
-(`Pending`). Для більш чіткого `Firing` можна повторити погану версію з вимкненим
-`rollout.analysis.enabled`.
+**Що ще можна додати зі скріншотів (в UI):** Grafana Explore з джерелом **Loki** і запитом
+`{namespace="clone-gitops"} | json | status >= 500` (рядки лише з одного пода); Argo CD у момент
+поганого релізу зі статусом `Synced` / `Degraded` і `AnalysisRun Failed`; Prometheus → Alerts зі
+станом `Pending` (або `Firing`, якщо повторити погану версію з вимкненим
+`rollout.analysis.enabled`).
