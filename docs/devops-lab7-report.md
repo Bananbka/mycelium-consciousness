@@ -225,6 +225,8 @@ revision:2  clone-factory-api-9bd9898   ReplicaSet  stable   (5 подів, ус
 clone-factory   Synced   Degraded
 ```
 
+![Argo CD під час поганого релізу: Synced to 52434bc, Health Degraded, Rollout і AnalysisRun з червоними серцями](media/lab7-argocd-synced-degraded.png)
+
 **Чому `Synced` + `Degraded`:** маніфест у кластері збігається з Git (там `FAIL_RATE=0.5`), тому
 Sync це `Synced`. Але реліз скасований і працює стара версія, тому Health це `Degraded`.
 
@@ -268,20 +270,24 @@ Rollout: ✔ Healthy, Step 5/5, 1.6.0 (stable), Ready 5/5
 ### 6д. Алерт (за бажанням)
 
 [`templates/prometheusrule.yaml`](https://github.com/Bananbka/mycelium-gitops/blob/main/charts/clone-factory/templates/prometheusrule.yaml):
-`CloneFactoryHighErrorRate`, частка 5xx > 5% протягом 1 хвилини. Під час поганого релізу
-він перейшов у `pending` (`activeAt 21:08:56Z`), але до `Firing` не дійшов: Rollout
-відкотився швидше за `for: 1m`. Методичка пояснює це й пропонує для демонстрації
-тимчасово вимкнути `rollout.analysis.enabled` і випустити погану версію повністю.
+`CloneFactoryHighErrorRate`, частка 5xx > 5% протягом 1 хвилини. Під час першого поганого релізу
+(`FAIL_RATE=0.5`) алерт перейшов лише в `pending` (`activeAt 21:08:56Z`): Rollout відкотився швидше за
+`for: 1m`, і методичка про це попереджає. Під час повторного поганого релізу (коміт `52434bc`)
+правило дійшло до **Firing**.
 
 ```
-> curl http://localhost:19090/api/v1/alerts
+> curl http://localhost:19090/api/v1/alerts          # перший реліз
 CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 ```
 
-Правило завантажене з ConfigMap чарту (група `clone-factory`); на скріншоті після відкату воно
-`Inactive`:
+Після відкату правило знову `Inactive`; скріншот у цьому стані підтверджує, що воно завантажене з
+ConfigMap чарту (група `clone-factory`):
 
-![Prometheus Alerts: правило CloneFactoryHighErrorRate із чарту](media/lab7-prometheus-alert-rule.png)
+![Prometheus Alerts: правило CloneFactoryHighErrorRate із чарту, Inactive після відкату](media/lab7-prometheus-alert-rule.png)
+
+Під час повторного релізу воно було у стані Firing:
+
+![Prometheus Alerts: CloneFactoryHighErrorRate у стані FIRING](media/lab7-alert-firing.png)
 
 ## 7. Проблеми, які виникли по дорозі
 
@@ -312,9 +318,4 @@ CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 | 4. Дашборд | 7 панелей, JSON у чарті, ConfigMap `grafana_dashboard`, доставка через Argo CD |
 | 5. Навантаження | `hey` (20 клієнтів, 3 хв) і фон; видно зростання RPS, p95, CPU; друга зміна: ендпоінт із помилками (`FAIL_RATE`, п. 6) |
 | 6. Відкат за метриками | `AnalysisTemplate` (95%), canary з кроком `analysis`, `FAIL_RATE=0.5` → `AnalysisRun Failed` → автоматичний abort → `Synced` + `Degraded`, 5xx і логи лише з нового пода, `git revert` → `Healthy` |
-| 6д*. Алерт | `PrometheusRule`: `pending`, до `Firing` не встиг через швидкий abort |
-
-**Що ще можна додати зі скріншотів (в UI):** Argo CD у момент
-поганого релізу зі статусом `Synced` / `Degraded` і `AnalysisRun Failed`; Prometheus → Alerts зі
-станом `Pending` (або `Firing`, якщо повторити погану версію з вимкненим
-`rollout.analysis.enabled`).
+| 6д*. Алерт | `PrometheusRule` `CloneFactoryHighErrorRate`: `pending` у першому релізі (відкат був швидшим за `for: 1m`), `Firing` у повторному |
