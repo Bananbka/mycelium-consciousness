@@ -105,6 +105,12 @@ Loki не було нетипових рядків поряд із JSON. Alloy �
 sum by (pod) (count_over_time({namespace="clone-gitops"} | json | status >= 500 [1m]))
 ```
 
+Grafana Explore, джерело Loki: запит із фільтром `status >= 500` за годину повернув 87 рядків
+(пік під час поганого релізу), мітки `app`, `pod`, `namespace` додає Alloy, а поля JSON (`route`, `status`,
+`duration_ms`, `version`) розбирає `| json`:
+
+![Grafana Explore (Loki): логи зі статусом 5xx, 87 рядків](media/lab7-loki-explore-5xx.png)
+
 ## 4. Дашборд
 
 Дашборд `Clone Factory API` (7 панелей) лежить у чарті як JSON і доставляється Argo CD як
@@ -308,8 +314,7 @@ CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 | 6. Відкат за метриками | `AnalysisTemplate` (95%), canary з кроком `analysis`, `FAIL_RATE=0.5` → `AnalysisRun Failed` → автоматичний abort → `Synced` + `Degraded`, 5xx і логи лише з нового пода, `git revert` → `Healthy` |
 | 6д*. Алерт | `PrometheusRule`: `pending`, до `Firing` не встиг через швидкий abort |
 
-**Що ще можна додати зі скріншотів (в UI):** Grafana Explore з джерелом **Loki** і запитом
-`{namespace="clone-gitops"} | json | status >= 500` (рядки лише з одного пода); Argo CD у момент
+**Що ще можна додати зі скріншотів (в UI):** Argo CD у момент
 поганого релізу зі статусом `Synced` / `Degraded` і `AnalysisRun Failed`; Prometheus → Alerts зі
 станом `Pending` (або `Firing`, якщо повторити погану версію з вимкненим
 `rollout.analysis.enabled`).
