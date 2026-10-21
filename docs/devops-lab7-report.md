@@ -237,6 +237,8 @@ clone-factory-api-75ff46f88f-6jlb4   90.6
 Поле `version` у логах однакове (образ той самий, відрізняється лише `FAIL_RATE`), тому нову
 версію ідентифікує саме `pod` / ReplicaSet.
 
+![Дашборд під час поганого релізу: частка 5xx ~10%, помилки лише з одного пода, JSON-логи помилок із Loki](media/lab7-dashboard-bad-release.png)
+
 Відкат завершено через Git:
 
 ```
@@ -295,7 +297,6 @@ CloneFactoryHighErrorRate  pending  2026-10-21T21:08:56.909163497Z
 | 6д*. Алерт | `PrometheusRule`: `pending`, до `Firing` не встиг через швидкий abort |
 
 **Що додати зі скріншотів (виконати в UI):** Prometheus → Status → Targets (ціль UP);
-Grafana Explore з логами 5xx; дашборд під час поганого релізу (панель «5xx по подах» з одним
-подом); Argo CD з AnalysisRun `Failed` і статусом `Synced` / `Degraded`; Prometheus → Alerts
+Grafana Explore з логами 5xx; Argo CD з AnalysisRun `Failed` і статусом `Synced` / `Degraded`; Prometheus → Alerts
 (`Pending`). Для більш чіткого `Firing` можна повторити погану версію з вимкненим
 `rollout.analysis.enabled`.
