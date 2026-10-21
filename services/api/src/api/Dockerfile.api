@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir uv \
     && pip uninstall -y setuptools wheel \
     && uv sync --package api --frozen --no-dev
 
+# The reported version; set per image with --build-arg APP_VERSION=<tag>.
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 USER app
 

@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,7 +11,7 @@ from api.routers import admin, auth, home, memories, profiles
 from shared import object_storage
 from shared.db.db import dispose_engine
 
-APP_VERSION = "1.2.0"
+APP_VERSION = os.getenv("APP_VERSION", "dev")
 
 
 @asynccontextmanager
