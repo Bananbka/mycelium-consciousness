@@ -1,0 +1,90 @@
+# ЛР №9: три екземпляри застосунку з ЛР №8 за nginx; LocalStack лишається емулятором AWS.
+#
+#   docker compose -f aws/lb/docker-compose.yaml up -d --build
+#
+#   http://localhost:8080   -> nginx (балансування між app1..app3)
+#   http://localhost:8081   -> app1 напряму (для порівняння "без балансування")
+#
+# Не запускайте разом з aws/docker-compose.yaml (ЛР №8): обидва мають контейнер "localstack".
+name: mycelium-lb
+
+x-env: &env
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+
+x-app: &app
+  image: mycelium-lb-app
+  build:
+    context: ../..
+    dockerfile: aws/lb/Dockerfile
+  restart: unless-stopped        # ручний `docker stop` його не повертає: це потрібно для демо
+  depends_on:
+    provision:
+      condition: service_completed_successfully
+
+services:
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:3.8.1}
+    container_name: localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: dynamodb,s3,iam,sts,logs,cloudwatch
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # одноразово створює таблиці DynamoDB і бакет S3
+  provision:
+    <<: *app
+    container_name: lb-provision
+    restart: "no"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment: *env
+    command: ["python", "provision.py"]
+
+  app1:
+    <<: *app
+    container_name: lb-app1
+    environment: { <<: *env, INSTANCE_ID: app-1 }
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  app2:
+    <<: *app
+    container_name: lb-app2
+    environment: { <<: *env, INSTANCE_ID: app-2 }
+
+  app3:
+    <<: *app
+    container_name: lb-app3
+    environment: { <<: *env, INSTANCE_ID: app-3 }
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: lb-nginx
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app1: { condition: service_healthy }
+      app2: { condition: service_healthy }
+      app3: { condition: service_healthy }
+
+networks:
+  default:
+    name: mycelium-lb-net
+
+volumes:
+  localstack_data:

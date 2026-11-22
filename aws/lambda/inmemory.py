@@ -13,6 +13,9 @@ class FakeDb:
         self.frames: dict[str, dict[str, dict]] = {}
         self.backups: dict[str, dict[str, dict]] = {}
 
+    def ping(self) -> None:
+        pass
+
     def create_clone(self, item: dict) -> bool:
         if item["clone_id"] in self.clones:
             return False
@@ -60,6 +63,9 @@ class FakeDb:
 class FakeBlobs:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
+
+    def ping(self) -> None:
+        pass
 
     def put(self, key: str, data: bytes) -> None:
         self.objects[key] = data

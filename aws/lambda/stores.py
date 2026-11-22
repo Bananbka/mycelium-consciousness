@@ -42,6 +42,9 @@ class DynamoDb:
         self.frames = dynamodb.Table(FRAMES_TABLE)
         self.backups = dynamodb.Table(BACKUPS_TABLE)
 
+    def ping(self) -> None:
+        self.clones.load()  # DescribeTable: cheap, proves the endpoint answers
+
     # clones -------------------------------------------------------------
     def create_clone(self, item: dict) -> bool:
         try:
@@ -116,6 +119,9 @@ class S3Blobs:
         self.client = boto3.client(
             "s3", config=Config(s3={"addressing_style": "path"}), **_kwargs()
         )
+
+    def ping(self) -> None:
+        self.client.head_bucket(Bucket=BUCKET)
 
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(Bucket=BUCKET, Key=key, Body=data)

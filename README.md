@@ -239,3 +239,7 @@ uv run --package api seed-admin ops@example.com <password>
   project as a serverless app in LocalStack (Lambda, API Gateway, DynamoDB, S3);
   code in [`aws/`](aws/README.md), how to present it in
   [`docs/devops-lab8-defense.md`](docs/devops-lab8-defense.md).
+- [`docs/devops-lab9-report.md`](docs/devops-lab9-report.md) — DevOps lab 9: three
+  instances of that app behind nginx (docker compose), health checks, outage
+  experiments; code in [`aws/lb/`](aws/lb/README.md), how to present it in
+  [`docs/devops-lab9-defense.md`](docs/devops-lab9-defense.md).

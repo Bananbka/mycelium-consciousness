@@ -40,8 +40,11 @@ def set_service(service: Service | None) -> None:
 # ---- routes: (method, resource template) -> (status, body) --------------------
 
 
-def _health(_s: Service, _p: dict, _b: dict) -> tuple[int, Any]:
-    return 200, {"status": "healthy"}
+def _health(s: Service, _p: dict, _b: dict) -> tuple[int, Any]:
+    checks = s.health()
+    healthy = all(v == "ok" for v in checks.values())
+    body = {"status": "healthy" if healthy else "degraded", "checks": checks}
+    return (200 if healthy else 503), body
 
 
 ROUTES: dict[tuple[str, str], Route] = {

@@ -42,6 +42,7 @@ class ApiError(Exception):
 
 
 class Db(Protocol):
+    def ping(self) -> None: ...
     def create_clone(self, item: dict) -> bool: ...
     def get_clone(self, clone_id: str) -> dict | None: ...
     def delete_clone(self, clone_id: str) -> None: ...
@@ -56,6 +57,7 @@ class Db(Protocol):
 
 
 class Blobs(Protocol):
+    def ping(self) -> None: ...
     def put(self, key: str, data: bytes) -> None: ...
     def get(self, key: str) -> bytes: ...
     def delete(self, key: str) -> None: ...
@@ -77,6 +79,19 @@ class Service:
         self.db = db
         self.blobs = blobs
         self.clock = clock
+
+    # ---- health -----------------------------------------------------------
+
+    def health(self) -> dict[str, str]:
+        """Reachability of each dependency (what a load balancer needs to know)."""
+        checks = {}
+        for name, dependency in (("dynamodb", self.db), ("s3", self.blobs)):
+            try:
+                dependency.ping()
+                checks[name] = "ok"
+            except Exception:
+                checks[name] = "error"
+        return checks
 
     # ---- clones ---------------------------------------------------------
 

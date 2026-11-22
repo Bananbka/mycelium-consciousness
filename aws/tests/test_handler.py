@@ -39,8 +39,19 @@ def call(wired, method, resource, params=None, body=None, raw_body=None):
 
 def test_health(wired) -> None:
     status, body, response = call(wired, "GET", "/health")
-    assert (status, body) == (200, {"status": "healthy"})
+    assert status == 200 and body["status"] == "healthy"
+    assert body["checks"] == {"dynamodb": "ok", "s3": "ok"}
     assert response["headers"]["X-Request-Id"] == "req-1"
+
+
+def test_health_reports_a_broken_dependency_as_503(wired, service) -> None:
+    def down() -> None:
+        raise ConnectionError("dynamodb unreachable")
+
+    service.db.ping = down
+    status, body, _ = call(wired, "GET", "/health")
+    assert status == 503 and body["status"] == "degraded"
+    assert body["checks"] == {"dynamodb": "error", "s3": "ok"}
 
 
 def test_full_create_get_delete_flow(wired) -> None:
