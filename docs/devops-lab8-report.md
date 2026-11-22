@@ -67,7 +67,7 @@ LocalStack — емулятор AWS API на одному порту `4566`; AWS
 ```
 > aws --endpoint-url http://localhost:4566 dynamodb list-tables
 <вивід>
-> aws --endpoint-url http://localhost:4566 lambda list-functions --query "Functions[].[FunctionName,Runtime,State]"
+> aws --endpoint-url http://localhost:4566 lambda list-functions --query "Functions[].[FunctionName,Runtime]"
 <вивід>
 > aws --endpoint-url http://localhost:4566 apigateway get-rest-apis --query "items[].[name,id]"
 <вивід>
