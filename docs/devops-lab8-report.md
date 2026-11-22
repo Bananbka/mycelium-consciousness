@@ -22,7 +22,7 @@ Serverless-застосунок у локальному AWS-середовищі
 <вивід: контейнер localstack, STATUS (healthy)>
 ```
 
-Образ LocalStack: `<localstack/localstack:3.8.1 або інший, який використали>`.
+Образ LocalStack: `<localstack/localstack:4.14.0 або інший, який використали>`.
 LocalStack — емулятор AWS API на одному порту `4566`; AWS CLI викликається з
 `--endpoint-url http://localhost:4566` і фіктивними ключами `test`/`test`.
 
