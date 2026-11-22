@@ -1,0 +1,29 @@
+# Alternative: gresau/localstack-persist keeps tables, buckets and functions
+# across container restarts (state in ./aws/volume).
+#
+#   docker compose -f aws/docker-compose.persist.yaml up -d
+name: mycelium-aws
+
+services:
+  localstack:
+    image: gresau/localstack-persist:latest
+    container_name: localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: lambda,apigateway,dynamodb,s3,iam,sts,logs,cloudwatch
+      LAMBDA_DOCKER_NETWORK: mycelium-aws-net
+      LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT: 120
+      PERSIST_DEFAULT: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./volume:/persisted-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+networks:
+  default:
+    name: mycelium-aws-net

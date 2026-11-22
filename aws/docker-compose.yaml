@@ -1,0 +1,38 @@
+# LocalStack: a local AWS (Lambda, API Gateway, DynamoDB, S3, CloudWatch, IAM).
+#
+#   docker compose -f aws/docker-compose.yaml up -d
+#
+# Lambda runs each function in its own container, so LocalStack needs the Docker
+# socket, and those containers must share a network with LocalStack (hence the
+# fixed network name and LAMBDA_DOCKER_NETWORK).
+name: mycelium-aws
+
+services:
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:3.8.1}
+    container_name: localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: lambda,apigateway,dynamodb,s3,iam,sts,logs,cloudwatch
+      DEBUG: ${LS_DEBUG:-0}
+      LAMBDA_DOCKER_NETWORK: mycelium-aws-net
+      # a cold start pulls the Lambda runtime image: allow time for it
+      LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT: 120
+      # only needed for newer images that ask for an account (see the README)
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+networks:
+  default:
+    name: mycelium-aws-net
+
+volumes:
+  localstack_data:

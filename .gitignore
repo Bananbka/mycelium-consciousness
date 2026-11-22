@@ -29,3 +29,7 @@ CLAUDE.md
 
 
 frontend/*
+
+# lab 8: build output and LocalStack state
+aws/build/
+aws/volume/

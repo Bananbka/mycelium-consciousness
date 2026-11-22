@@ -235,3 +235,7 @@ uv run --package api seed-admin ops@example.com <password>
   analysis of at least three potential degradation points under high load.
 - [`docs/raci-matrix.md`](docs/raci-matrix.md) — responsibility matrix and
   module breakdown for the two-person team.
+- [`docs/devops-lab8-report.md`](docs/devops-lab8-report.md) — DevOps lab 8: the
+  project as a serverless app in LocalStack (Lambda, API Gateway, DynamoDB, S3);
+  code in [`aws/`](aws/README.md), how to present it in
+  [`docs/devops-lab8-defense.md`](docs/devops-lab8-defense.md).
