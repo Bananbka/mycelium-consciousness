@@ -143,9 +143,11 @@ def cmd_outage(args) -> None:
         total = stop - start
         for when, action in ((total / 3, "stop"), (2 * total / 3, "start")):
             time.sleep(max(0, start + when - time.perf_counter()))
+            began = time.perf_counter() - start
             docker(action, args.container)
+            done = time.perf_counter() - start
             events.append(
-                (time.perf_counter() - start, f"docker {action} {args.container}")
+                (began, f"docker {action} {args.container} (took {done - began:.1f}s)")
             )
 
     chaos_thread = threading.Thread(
