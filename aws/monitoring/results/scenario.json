@@ -1,0 +1,96 @@
+{
+  "start": 1795355311.850491,
+  "end": 1795355607.0244157,
+  "phases": [
+    {
+      "name": "baseline",
+      "start": 1795355311.9108317,
+      "end": 1795355356.9966893,
+      "chaos": null
+    },
+    {
+      "name": "errors",
+      "start": 1795355357.005344,
+      "end": 1795355417.096245,
+      "chaos": {
+        "error_rate": 0.5
+      }
+    },
+    {
+      "name": "latency",
+      "start": 1795355417.131455,
+      "end": 1795355477.5165844,
+      "chaos": {
+        "latency_ms": 400
+      }
+    },
+    {
+      "name": "recovery",
+      "start": 1795355477.538387,
+      "end": 1795355599.0056584,
+      "chaos": null
+    }
+  ],
+  "alarm_log": [
+    {
+      "t": 1795355316.9211724,
+      "alarm": "mycelium-errors-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355316.9211724,
+      "alarm": "mycelium-latency-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355362.013162,
+      "alarm": "mycelium-errors-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355362.013162,
+      "alarm": "mycelium-latency-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355387.0580168,
+      "alarm": "mycelium-errors-high",
+      "state": "ALARM"
+    },
+    {
+      "t": 1795355422.1432369,
+      "alarm": "mycelium-errors-high",
+      "state": "ALARM"
+    },
+    {
+      "t": 1795355422.1432369,
+      "alarm": "mycelium-latency-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355477.2108674,
+      "alarm": "mycelium-latency-high",
+      "state": "ALARM"
+    },
+    {
+      "t": 1795355482.5522423,
+      "alarm": "mycelium-errors-high",
+      "state": "ALARM"
+    },
+    {
+      "t": 1795355482.5522423,
+      "alarm": "mycelium-latency-high",
+      "state": "ALARM"
+    },
+    {
+      "t": 1795355533.8903906,
+      "alarm": "mycelium-errors-high",
+      "state": "OK"
+    },
+    {
+      "t": 1795355568.9502919,
+      "alarm": "mycelium-latency-high",
+      "state": "OK"
+    }
+  ]
+}

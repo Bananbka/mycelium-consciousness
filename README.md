@@ -243,3 +243,7 @@ uv run --package api seed-admin ops@example.com <password>
   instances of that app behind nginx (docker compose), health checks, outage
   experiments; code in [`aws/lb/`](aws/lb/README.md), how to present it in
   [`docs/devops-lab9-defense.md`](docs/devops-lab9-defense.md).
+- [`docs/devops-lab10-report.md`](docs/devops-lab10-report.md) — DevOps lab 10: CloudWatch
+  metrics, alarms, controlled load with injected faults, graphs; code in
+  [`aws/monitoring/`](aws/monitoring/README.md), how to present it in
+  [`docs/devops-lab10-defense.md`](docs/devops-lab10-defense.md).

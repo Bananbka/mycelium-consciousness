@@ -30,8 +30,8 @@ Invoke-RestMethod http://localhost:8080/health            # відповідь �
 | Адреса | Що |
 | --- | --- |
 | `http://localhost:8080` | nginx — єдина точка входу, балансує між app1..app3 |
-| `http://localhost:8081` | app1 напряму — «без балансування» |
-| `http://localhost:4566` | LocalStack |
+| `http://localhost:8081` … `8083` | app1…app3 напряму — «без балансування»; у ЛР №10 ще й `/admin/chaos` |
+| `http://localhost:4566` | LocalStack (образ `localstack/localstack:4.14.0`) |
 
 ## Експерименти (`aws/lb/scripts/lbtool.py`, лише стандартна бібліотека Python)
 
@@ -64,6 +64,9 @@ docker inspect --format "{{.State.Health.Status}}" lb-app1
 ```
 
 ## Як це влаштовано
+
+> Починаючи з ЛР №10 екземпляри ще й публікують метрики в CloudWatch та підтримують fault injection
+> (`metrics.py`, `chaos.py`); див. [`aws/monitoring/README.md`](../monitoring/README.md).
 
 | Файл | Роль |
 | --- | --- |

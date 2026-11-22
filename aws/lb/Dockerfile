@@ -8,8 +8,8 @@ WORKDIR /app
 COPY aws/lambda/handler.py aws/lambda/service.py aws/lambda/stores.py aws/lambda/inmemory.py ./
 # the two modules the main project shares with it
 COPY shared/src/shared/__init__.py shared/src/shared/backup_codec.py shared/src/shared/subscriptions.py shared/
-# the HTTP wrapper and the provisioning job
-COPY aws/lb/server.py aws/lb/provision.py ./
+# the HTTP wrapper, the provisioning job, CloudWatch metrics and fault injection
+COPY aws/lb/server.py aws/lb/provision.py aws/lb/metrics.py aws/lb/chaos.py ./
 
 USER app
 ENV PYTHONUNBUFFERED=1 PORT=8080

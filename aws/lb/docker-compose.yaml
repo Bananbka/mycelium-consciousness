@@ -3,7 +3,7 @@
 #   docker compose -f aws/lb/docker-compose.yaml up -d --build
 #
 #   http://localhost:8080   -> nginx (балансування між app1..app3)
-#   http://localhost:8081   -> app1 напряму (для порівняння "без балансування")
+#   http://localhost:8081..8083 -> app1..app3 напряму (порівняння; /admin/chaos у ЛР №10)
 #
 # Не запускайте разом з aws/docker-compose.yaml (ЛР №8): обидва мають контейнер "localstack".
 name: mycelium-lb
@@ -13,6 +13,10 @@ x-env: &env
   AWS_ACCESS_KEY_ID: test
   AWS_SECRET_ACCESS_KEY: test
   AWS_DEFAULT_REGION: us-east-1
+  # lab 10: publish request metrics to CloudWatch, allow fault injection (/admin/chaos)
+  METRICS_ENABLED: "1"
+  METRICS_FLUSH_SECONDS: "5"
+  CHAOS_ENABLED: "1"
 
 x-app: &app
   image: mycelium-lb-app
@@ -26,7 +30,7 @@ x-app: &app
 
 services:
   localstack:
-    image: ${LOCALSTACK_IMAGE:-localstack/localstack:3.8.1}
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:4.14.0}
     container_name: localstack
     ports:
       - "127.0.0.1:4566:4566"
@@ -63,11 +67,15 @@ services:
     <<: *app
     container_name: lb-app2
     environment: { <<: *env, INSTANCE_ID: app-2 }
+    ports:
+      - "127.0.0.1:8082:8080"
 
   app3:
     <<: *app
     container_name: lb-app3
     environment: { <<: *env, INSTANCE_ID: app-3 }
+    ports:
+      - "127.0.0.1:8083:8080"
 
   nginx:
     image: nginx:1.27-alpine
